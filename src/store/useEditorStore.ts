@@ -8,9 +8,9 @@ import { validateLevel } from '@/utils/validator';
 import { createDefaultLevel, createSampleLevels, exportToJSON, importFromJSON } from '@/utils/serializer';
 
 interface EditorState {
-  past: LevelData[];
+  past: { level: LevelData; validation: ValidationResult | null }[];
   present: LevelData;
-  future: LevelData[];
+  future: { level: LevelData; validation: ValidationResult | null }[];
   lastValidation: ValidationResult | null;
   selectedTool: ToolId;
   simulationState: SimulationState | null;
@@ -51,11 +51,13 @@ interface EditorState {
   persist: () => void;
 }
 
+type HistoryEntry = { level: LevelData; validation: ValidationResult | null };
+
 let toastCounter = 0;
 
-function pushToHistory(past: LevelData[], present: LevelData, newPresent: LevelData): { past: LevelData[]; present: LevelData } {
+function pushToHistory(past: HistoryEntry[], present: LevelData, lastValidation: ValidationResult | null, newPresent: LevelData): { past: HistoryEntry[]; present: LevelData } {
   return {
-    past: [...past, present],
+    past: [...past, { level: present, validation: lastValidation }],
     present: newPresent,
   };
 }
@@ -107,23 +109,23 @@ export const useEditorStore = create<EditorState>()(
     },
 
     setTileAt: (x: number, y: number, tile: TileType) => {
-      const { present, past } = get();
+      const { present, past, lastValidation } = get();
       const newTiles = setTile(present.tiles, x, y, tile);
       const updated = rebuildDerivedFromTiles({ ...present, tiles: newTiles, updatedAt: Date.now() });
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, updated);
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
       set({ past: newPast, present: newPresent, future: [], lastValidation: null });
     },
 
     resizeLevelTo: (width: number, height: number) => {
-      const { present, past } = get();
+      const { present, past, lastValidation } = get();
       const updated = resizeLevel(present, width, height);
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, { ...updated, updatedAt: Date.now() });
-      set({ past: newPast, present: newPresent, future: [] });
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, { ...updated, updatedAt: Date.now() });
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
       get().addToast('info', `地图已调整为 ${width}×${height}`);
     },
 
     updateRules: (partial: Partial<LevelRules>) => {
-      const { present, past } = get();
+      const { present, past, lastValidation } = get();
       const newRules = { ...present.rules, ...partial };
       const shouldInvalidate =
         'winCondition' in partial ||
@@ -137,12 +139,12 @@ export const useEditorStore = create<EditorState>()(
       if (shouldInvalidate && present.moveLog.length > 0) {
         get().addToast('warning', '规则已变更，已有解法步骤标记为失效，请重新录制');
       }
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, updated);
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
       set({ past: newPast, present: newPresent, future: [], lastValidation: null });
     },
 
     addSwitchDoorRule: (rule: SwitchDoorRule) => {
-      const { present, past } = get();
+      const { present, past, lastValidation } = get();
       const newRules = {
         ...present.rules,
         switchDoors: [...present.rules.switchDoors, rule],
@@ -156,12 +158,12 @@ export const useEditorStore = create<EditorState>()(
       if (present.moveLog.length > 0) {
         get().addToast('warning', '机关规则已变更，解法步骤已标记失效');
       }
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, updated);
-      set({ past: newPast, present: newPresent, future: [] });
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
     },
 
     removeSwitchDoorRule: (index: number) => {
-      const { present, past } = get();
+      const { present, past, lastValidation } = get();
       const newDoors = [...present.rules.switchDoors];
       newDoors.splice(index, 1);
       const newRules = { ...present.rules, switchDoors: newDoors };
@@ -174,8 +176,8 @@ export const useEditorStore = create<EditorState>()(
       if (present.moveLog.length > 0) {
         get().addToast('warning', '机关规则已变更，解法步骤已标记失效');
       }
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, updated);
-      set({ past: newPast, present: newPresent, future: [] });
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
     },
 
     setSelectedTool: (tool: ToolId) => {
@@ -183,28 +185,28 @@ export const useEditorStore = create<EditorState>()(
     },
 
     undo: () => {
-      const { past, present, future } = get();
+      const { past, present, future, lastValidation } = get();
       if (past.length === 0) return;
       const previous = past[past.length - 1];
       const newPast = past.slice(0, -1);
       set({
         past: newPast,
-        present: previous,
-        future: [present, ...future],
-        lastValidation: null,
+        present: previous.level,
+        future: [{ level: present, validation: lastValidation }, ...future],
+        lastValidation: previous.validation,
       });
     },
 
     redo: () => {
-      const { past, present, future } = get();
+      const { past, present, future, lastValidation } = get();
       if (future.length === 0) return;
       const next = future[0];
       const newFuture = future.slice(1);
       set({
-        past: [...past, present],
-        present: next,
+        past: [...past, { level: present, validation: lastValidation }],
+        present: next.level,
         future: newFuture,
-        lastValidation: null,
+        lastValidation: next.validation,
       });
     },
 
@@ -212,7 +214,7 @@ export const useEditorStore = create<EditorState>()(
     canRedo: () => get().future.length > 0,
 
     startRecording: () => {
-      const { present } = get();
+      const { present, past, lastValidation } = get();
       const result = validateLevel(present);
       if (!result.valid) {
         get().addToast('error', '关卡校验未通过，无法开始录制');
@@ -220,11 +222,15 @@ export const useEditorStore = create<EditorState>()(
         return;
       }
       const simState = initialSimulationState(present);
+      const newLevel: LevelData = { ...present, moveLog: [], moveLogInvalidated: false, updatedAt: Date.now() };
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, newLevel);
       set({
         isRecording: true,
         simulationState: simState,
         currentStepIndex: -1,
-        present: { ...present, moveLog: [], moveLogInvalidated: false },
+        past: newPast,
+        present: newPresent,
+        future: [],
         lastValidation: result,
       });
       get().addToast('success', '录制已开始，使用方向键或按钮移动');
@@ -236,7 +242,7 @@ export const useEditorStore = create<EditorState>()(
     },
 
     recordStep: (direction: Direction) => {
-      const { present, simulationState, isRecording } = get();
+      const { present, simulationState, isRecording, past, lastValidation } = get();
       if (!isRecording || !simulationState) return null;
       if (present.moveLogInvalidated) {
         get().addToast('error', '解法步骤已失效（规则变更），请清除后重新录制');
@@ -250,9 +256,12 @@ export const useEditorStore = create<EditorState>()(
 
       const newLog = [...present.moveLog, result.step];
       const updated: LevelData = { ...present, moveLog: newLog, updatedAt: Date.now() };
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
       set({
         simulationState: result.state,
-        present: updated,
+        past: newPast,
+        present: newPresent,
+        future: [],
         currentStepIndex: newLog.length - 1,
       });
 
@@ -265,9 +274,9 @@ export const useEditorStore = create<EditorState>()(
     },
 
     clearMoveLog: () => {
-      const { present, past } = get();
+      const { present, past, lastValidation } = get();
       const updated: LevelData = { ...present, moveLog: [], moveLogInvalidated: false, updatedAt: Date.now() };
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, updated);
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
       set({
         past: newPast,
         present: newPresent,
@@ -341,8 +350,8 @@ export const useEditorStore = create<EditorState>()(
         }
         return false;
       }
-      const { past, present } = get();
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, result.level);
+      const { past, present, lastValidation } = get();
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, result.level);
       set({
         past: newPast,
         present: newPresent,
@@ -367,10 +376,16 @@ export const useEditorStore = create<EditorState>()(
         if (!raw) return;
         const data = JSON.parse(raw);
         if (data.past && data.present) {
+          const past = Array.isArray(data.past[0]) || data.past[0]?.level !== undefined
+            ? data.past
+            : data.past.map((l: LevelData) => ({ level: l, validation: null }));
+          const future = Array.isArray(data.future?.[0]) || data.future?.[0]?.level !== undefined
+            ? data.future || []
+            : (data.future || []).map((l: LevelData) => ({ level: l, validation: null }));
           set({
-            past: data.past,
+            past,
             present: data.present,
-            future: data.future || [],
+            future,
             lastValidation: data.lastValidation || null,
           });
           get().addToast('info', '已恢复上次编辑状态');
@@ -426,7 +441,7 @@ useEditorStore.subscribe(
       useEditorStore.getState().persist();
     }, 500);
   },
-  { equalityFn: (a, b) => a.present === b.present }
+  { equalityFn: (a, b) => a.present === b.present && a.lastValidation === b.lastValidation }
 );
 
 let persistTimer: ReturnType<typeof setTimeout>;
