@@ -10,9 +10,11 @@ import {
   ChevronDown,
   Camera,
   BookOpen,
+  Archive,
 } from 'lucide-react';
 import { useEditorStore } from '@/store/useEditorStore';
 import { useCampaignStore } from '@/store/useCampaignStore';
+import { useCampaignArchiveStore } from '@/store/useCampaignArchiveStore';
 import { cn } from '@/lib/utils';
 
 const SAMPLE_LABELS = ['新手教程', '经典推箱', '机关迷宫'];
@@ -28,6 +30,9 @@ export default function Toolbar() {
   const campaigns = useCampaignStore((s) => s.campaigns);
   const campaignPanelOpen = useCampaignStore((s) => s.campaignPanelOpen);
   const setCampaignPanelOpen = useCampaignStore((s) => s.setCampaignPanelOpen);
+  const archives = useCampaignArchiveStore((s) => s.archives);
+  const archivePanelOpen = useCampaignArchiveStore((s) => s.archivePanelOpen);
+  const setArchivePanelOpen = useCampaignArchiveStore((s) => s.setArchivePanelOpen);
 
   const newLevel = useEditorStore((s) => s.newLevel);
   const loadSample = useEditorStore((s) => s.loadSample);
@@ -204,6 +209,19 @@ export default function Toolbar() {
           {campaigns.length > 0 && (
             <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] font-bold bg-emeraldx-500 text-abyss-900 rounded-full flex items-center justify-center">
               {campaigns.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          className={cn('btn-ghost px-2 py-1 relative', archivePanelOpen && 'bg-white/10')}
+          onClick={() => setArchivePanelOpen(!archivePanelOpen)}
+          title="战役档案库"
+        >
+          <Archive size={16} />
+          {archives.length > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] font-bold bg-amberx-500 text-abyss-900 rounded-full flex items-center justify-center">
+              {archives.length}
             </span>
           )}
         </button>

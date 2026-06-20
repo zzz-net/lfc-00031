@@ -1,5 +1,5 @@
-import type { LevelData, Position, SwitchDoorRule, LevelRules, MoveStep, SnapshotPackage, DraftSnapshot, HistoryState, ValidationResult, OperationLogEntry, SnapshotConflictStrategy, SnapshotPackageImportResult, Campaign, CampaignLevel, CampaignLevelMeta, UnlockCondition, LevelPlayResult, CampaignProgress, CampaignPackage, CampaignPackageImportResult, CampaignConflictStrategy, CampaignLevelConflictStrategy, UnlockConditionType } from '@/types';
-import { TileType as TT, WinCondition, Direction, DATA_VERSION, SNAPSHOT_PACKAGE_VERSION, PACKAGE_TYPE_IDENTIFIER, CAMPAIGN_PACKAGE_VERSION, CAMPAIGN_TYPE_IDENTIFIER, UnlockConditionType as UCT } from '@/types';
+import type { LevelData, Position, SwitchDoorRule, LevelRules, MoveStep, SnapshotPackage, DraftSnapshot, HistoryState, ValidationResult, OperationLogEntry, SnapshotConflictStrategy, SnapshotPackageImportResult, Campaign, CampaignLevel, CampaignLevelMeta, UnlockCondition, LevelPlayResult, CampaignProgress, CampaignPackage, CampaignPackageImportResult, CampaignConflictStrategy, CampaignLevelConflictStrategy, UnlockConditionType, CampaignArchive, CampaignArchiveSnapshot, CampaignArchivePackage, CampaignArchiveConflictStrategy, CampaignArchiveImportResult } from '@/types';
+import { TileType as TT, WinCondition, Direction, DATA_VERSION, SNAPSHOT_PACKAGE_VERSION, PACKAGE_TYPE_IDENTIFIER, CAMPAIGN_PACKAGE_VERSION, CAMPAIGN_TYPE_IDENTIFIER, UnlockConditionType as UCT, ARCHIVE_PACKAGE_VERSION, ARCHIVE_TYPE_IDENTIFIER } from '@/types';
 import { createEmptyTiles, findPositions } from './mapOps';
 
 function makeSwitchId(pos: Position): string {
@@ -1534,3 +1534,548 @@ function sanitizeCampaignProgress(obj: unknown, campaignId: string): CampaignPro
       : {},
   };
 }
+
+let archiveIdCounter = 0;
+let archiveSnapshotIdCounter = 0;
+
+export function genArchiveId(): string {
+  return `arch_${Date.now()}_${++archiveIdCounter}`;
+}
+
+export function genArchiveSnapshotId(): string {
+  return `asnap_${Date.now()}_${++archiveSnapshotIdCounter}`;
+}
+
+export function createCampaignArchive(
+  name: string,
+  campaign: Campaign,
+  progress: CampaignProgress,
+  description = '',
+): CampaignArchive {
+  const now = Date.now();
+  return {
+    id: genArchiveId(),
+    name,
+    description,
+    notes: '',
+    archived: false,
+    createdAt: now,
+    updatedAt: now,
+    lastPlayedAt: null,
+    campaign: JSON.parse(JSON.stringify(campaign)),
+    progress: JSON.parse(JSON.stringify(progress)),
+  };
+}
+
+export function createArchiveSnapshot(
+  name: string,
+  archive: CampaignArchive,
+  description = '',
+): CampaignArchiveSnapshot {
+  return {
+    id: genArchiveSnapshotId(),
+    name,
+    description,
+    createdAt: Date.now(),
+    archiveId: archive.id,
+    archive: JSON.parse(JSON.stringify(archive)),
+  };
+}
+
+export function exportArchivePackage(params: {
+  archive: CampaignArchive;
+  snapshots?: CampaignArchiveSnapshot[];
+  operationLog: OperationLogEntry[];
+}): string {
+  const pkg: CampaignArchivePackage = {
+    packageVersion: ARCHIVE_PACKAGE_VERSION,
+    archiveVersion: '1.0.0',
+    exportedAt: Date.now(),
+    archive: JSON.parse(JSON.stringify(params.archive)),
+    snapshots: params.snapshots ? JSON.parse(JSON.stringify(params.snapshots)) : [],
+    operationLog: JSON.parse(JSON.stringify(params.operationLog)),
+  };
+  const envelope = {
+    _type: ARCHIVE_TYPE_IDENTIFIER,
+    data: pkg,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+export function validateArchiveStructure(obj: unknown): { ok: boolean; valid: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!obj || typeof obj !== 'object') {
+    return { ok: false, valid: false, errors: ['档案数据不是对象'], warnings };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.id !== 'string') errors.push('缺少 id 或类型错误');
+  if (typeof o.name !== 'string') errors.push('缺少 name 或类型错误');
+  if (typeof o.description !== 'string') errors.push('缺少 description 或类型错误');
+  if (typeof o.notes !== 'string') errors.push('缺少 notes 或类型错误');
+  if (typeof o.archived !== 'boolean') errors.push('缺少 archived 或类型错误');
+  if (typeof o.createdAt !== 'number') errors.push('缺少 createdAt 或类型错误');
+  if (typeof o.updatedAt !== 'number') errors.push('缺少 updatedAt 或类型错误');
+  if (o.lastPlayedAt !== undefined && o.lastPlayedAt !== null && typeof o.lastPlayedAt !== 'number') {
+    errors.push('lastPlayedAt 类型错误');
+  }
+
+  if (!o.campaign || typeof o.campaign !== 'object') {
+    errors.push('缺少 campaign 或格式错误');
+  } else {
+    const campaignCheck = validateCampaignStructure(o.campaign);
+    if (!campaignCheck.ok) {
+      errors.push(...campaignCheck.errors.map((e) => `campaign: ${e}`));
+    }
+    warnings.push(...campaignCheck.warnings);
+  }
+
+  if (!o.progress || typeof o.progress !== 'object') {
+    errors.push('缺少 progress 或格式错误');
+  } else {
+    const progressErrors = validateCampaignProgress(o.progress);
+    errors.push(...progressErrors.map((e) => `progress: ${e}`));
+  }
+
+  return { ok: errors.length === 0, valid: errors.length === 0, errors, warnings };
+}
+
+function validateArchiveSnapshotStructure(obj: unknown, index: number): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return [`快照 ${index + 1}: 不是对象`];
+  }
+  const o = obj as Record<string, unknown>;
+  if (typeof o.id !== 'string') errors.push(`快照 ${index + 1}: 缺少 id`);
+  if (typeof o.name !== 'string') errors.push(`快照 ${index + 1}: 缺少 name`);
+  if (typeof o.createdAt !== 'number') errors.push(`快照 ${index + 1}: 缺少 createdAt`);
+  if (typeof o.archiveId !== 'string') errors.push(`快照 ${index + 1}: 缺少 archiveId`);
+  if (!o.archive || typeof o.archive !== 'object') {
+    errors.push(`快照 ${index + 1}: 缺少 archive 数据`);
+  } else {
+    const archiveCheck = validateArchiveStructure(o.archive);
+    errors.push(...archiveCheck.errors.map((e) => `快照 ${index + 1}.archive: ${e}`));
+  }
+  return errors;
+}
+
+export function checkArchiveVersionCompatibility(pkgVersion: string, currentVersion: string = ARCHIVE_PACKAGE_VERSION): { compatible: boolean; warnings: string[]; errors: string[]; warning: boolean } {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  const currentMajor = currentVersion.split('.')[0];
+  const pkgMajor = pkgVersion.split('.')[0];
+
+  if (currentMajor !== pkgMajor) {
+    errors.push(`档案包版本 ${pkgVersion} 与当前版本 ${currentVersion} 主版本号不兼容，无法导入`);
+    return { compatible: false, warnings, errors, warning: false };
+  }
+
+  const cmp = compareSemver(pkgVersion, currentVersion);
+  if (cmp > 0) {
+    warnings.push(`档案包版本 ${pkgVersion} 高于当前版本 ${currentVersion}，部分字段可能无法识别，将尝试兼容导入`);
+  } else if (cmp < 0) {
+    warnings.push(`档案包版本 ${pkgVersion} 低于当前版本 ${currentVersion}，将按旧格式兼容导入`);
+  }
+
+  return { compatible: true, warnings, errors, warning: warnings.length > 0 };
+}
+
+export function validateArchivePackageStructure(obj: unknown): { ok: boolean; valid: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+
+  if (!obj || typeof obj !== 'object') {
+    return { ok: false, valid: false, errors: ['档案包不是对象'], warnings };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.packageVersion !== 'string') {
+    errors.push('缺少 packageVersion 或类型错误');
+  }
+  if (typeof o.exportedAt !== 'number') {
+    warnings.push('缺少 exportedAt，将使用当前时间');
+  }
+
+  if (!o.archive || typeof o.archive !== 'object') {
+    errors.push('缺少 archive 或格式错误');
+  } else {
+    const archiveCheck = validateArchiveStructure(o.archive);
+    if (!archiveCheck.ok) {
+      errors.push(...archiveCheck.errors.map((e) => `archive: ${e}`));
+    }
+    warnings.push(...archiveCheck.warnings);
+  }
+
+  if (o.snapshots !== undefined) {
+    if (!Array.isArray(o.snapshots)) {
+      errors.push('snapshots 必须是数组');
+    } else {
+      for (let i = 0; i < o.snapshots.length; i++) {
+        const snapshotErrors = validateArchiveSnapshotStructure(o.snapshots[i], i);
+        errors.push(...snapshotErrors);
+      }
+    }
+  }
+
+  if (o.operationLog !== undefined && !Array.isArray(o.operationLog)) {
+    errors.push('operationLog 必须是数组');
+  }
+
+  return { ok: errors.length === 0, valid: errors.length === 0, errors, warnings };
+}
+
+export function parseArchivePackage(str: string): { pkg: CampaignArchivePackage | null; errors: string[]; warnings: string[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(str);
+  } catch {
+    return { pkg: null, errors: ['JSON 解析失败：格式不合法'], warnings: [] };
+  }
+
+  const allWarnings: string[] = [];
+  const allErrors: string[] = [];
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { pkg: null, errors: ['档案包根元素必须是对象'], warnings: [] };
+  }
+  const envelope = parsed as Record<string, unknown>;
+
+  if (envelope._type !== ARCHIVE_TYPE_IDENTIFIER) {
+    return { pkg: null, errors: ['不是合法的档案包文件（缺少类型标识）'], warnings: [] };
+  }
+
+  const data = envelope.data as Record<string, unknown> | undefined;
+  if (!data || typeof data !== 'object') {
+    return { pkg: null, errors: ['档案包缺少 data 字段'], warnings: [] };
+  }
+
+  let packageVersion = ARCHIVE_PACKAGE_VERSION;
+  if (typeof data.packageVersion === 'string') {
+    packageVersion = data.packageVersion;
+    const versionCheck = checkArchiveVersionCompatibility(packageVersion);
+    if (versionCheck.compatible) {
+      allWarnings.push(...versionCheck.warnings);
+    } else {
+      const pkgMajor = parseInt(packageVersion.split('.')[0] || '0', 10);
+      const curMajor = parseInt(ARCHIVE_PACKAGE_VERSION.split('.')[0] || '1', 10);
+      if (pkgMajor < curMajor) {
+        allWarnings.push(...versionCheck.errors);
+        allWarnings.push('旧版本档案包，将尝试兼容导入，部分数据可能丢失');
+      } else {
+        allErrors.push(...versionCheck.errors);
+        return { pkg: null, errors: allErrors, warnings: allWarnings };
+      }
+    }
+  } else {
+    allWarnings.push('缺少 packageVersion 字段，使用当前版本');
+  }
+
+  let exportedAt = Date.now();
+  if (typeof data.exportedAt === 'number') {
+    exportedAt = data.exportedAt;
+  } else {
+    allWarnings.push('缺少 exportedAt 字段，使用当前时间');
+  }
+
+  let archive: CampaignArchive | null = null;
+  if (data.archive && typeof data.archive === 'object') {
+    const sanitizeResult = sanitizeArchive(data.archive);
+    archive = sanitizeResult.archive;
+    allWarnings.push(...sanitizeResult.warnings.map(w => `archive: ${w}`));
+  }
+
+  if (!archive) {
+    return { pkg: null, errors: ['缺少有效的 archive 数据'], warnings: allWarnings };
+  }
+
+  let snapshots: CampaignArchiveSnapshot[] = [];
+  if (Array.isArray(data.snapshots)) {
+    for (let i = 0; i < data.snapshots.length; i++) {
+      const s = data.snapshots[i];
+      const sanitizeResult = sanitizeArchiveSnapshot(s, i);
+      if (sanitizeResult.snapshot) {
+        snapshots.push(sanitizeResult.snapshot);
+      }
+      allWarnings.push(...sanitizeResult.warnings.map(w => `snapshots[${i}]: ${w}`));
+    }
+  } else {
+    allWarnings.push('缺少 snapshots 或不是数组，已设为空数组');
+  }
+
+  let operationLog: OperationLogEntry[] = [];
+  if (Array.isArray(data.operationLog)) {
+    operationLog = data.operationLog as OperationLogEntry[];
+  } else {
+    allWarnings.push('缺少 operationLog 或不是数组，已设为空数组');
+  }
+
+  const pkg: CampaignArchivePackage = {
+    packageVersion,
+    archiveVersion: typeof data.archiveVersion === 'string' ? data.archiveVersion : '1.0.0',
+    exportedAt,
+    archive,
+    snapshots,
+    operationLog,
+  };
+
+  if (allErrors.length > 0) {
+    return { pkg: null, errors: allErrors, warnings: allWarnings };
+  }
+
+  return { pkg, errors: [], warnings: allWarnings };
+}
+
+export function sanitizeArchive(obj: unknown): { archive: CampaignArchive | null; warnings: string[] } {
+  const warnings: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { archive: null, warnings: ['档案数据不是对象'] };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.id !== 'string') warnings.push('缺少 id，已生成新 id');
+  if (typeof o.name !== 'string') warnings.push('缺少 name，已使用默认名称');
+  if (typeof o.description !== 'string') warnings.push('缺少 description，已设为空');
+  if (typeof o.notes !== 'string') warnings.push('缺少 notes，已设为空');
+  if (typeof o.archived !== 'boolean') warnings.push('缺少 archived，已设为 false');
+  if (typeof o.createdAt !== 'number') warnings.push('缺少 createdAt，已使用当前时间');
+  if (typeof o.updatedAt !== 'number') warnings.push('缺少 updatedAt，已使用当前时间');
+
+  const campaignResult = sanitizeCampaign(o.campaign);
+  const campaign = campaignResult.campaign;
+  warnings.push(...campaignResult.warnings.map(w => `campaign: ${w}`));
+
+  if (!campaign) {
+    warnings.push('campaign 数据无效，无法创建档案');
+    return { archive: null, warnings };
+  }
+
+  const now = Date.now();
+  const archive: CampaignArchive = {
+    id: typeof o.id === 'string' ? o.id : genArchiveId(),
+    name: typeof o.name === 'string' ? o.name : '未命名档案',
+    description: typeof o.description === 'string' ? o.description : '',
+    notes: typeof o.notes === 'string' ? o.notes : '',
+    archived: typeof o.archived === 'boolean' ? o.archived : false,
+    createdAt: typeof o.createdAt === 'number' ? o.createdAt : now,
+    updatedAt: typeof o.updatedAt === 'number' ? o.updatedAt : now,
+    lastPlayedAt: typeof o.lastPlayedAt === 'number' ? o.lastPlayedAt : null,
+    campaign,
+    progress: sanitizeCampaignProgress(o.progress, campaign.id),
+  };
+
+  return { archive, warnings };
+}
+
+function sanitizeArchiveSnapshot(obj: unknown, index: number): { snapshot: CampaignArchiveSnapshot | null; warnings: string[] } {
+  const warnings: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { snapshot: null, warnings: [`快照 ${index + 1}: 不是对象，已跳过`] };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.id !== 'string') warnings.push(`快照 ${index + 1}: 缺少 id，已生成新 id`);
+  if (typeof o.name !== 'string') warnings.push(`快照 ${index + 1}: 缺少 name，已使用默认名称`);
+  if (typeof o.createdAt !== 'number') warnings.push(`快照 ${index + 1}: 缺少 createdAt，已使用当前时间`);
+
+  const archiveResult = sanitizeArchive(o.archive);
+  if (!archiveResult.archive) {
+    warnings.push(`快照 ${index + 1}: archive 数据无效，已跳过`);
+    return { snapshot: null, warnings: [...warnings, ...archiveResult.warnings] };
+  }
+
+  const now = Date.now();
+  const snapshot: CampaignArchiveSnapshot = {
+    id: typeof o.id === 'string' ? o.id : genArchiveSnapshotId(),
+    name: typeof o.name === 'string' ? o.name : `快照 ${index + 1}`,
+    description: typeof o.description === 'string' ? o.description : '',
+    createdAt: typeof o.createdAt === 'number' ? o.createdAt : now,
+    archiveId: typeof o.archiveId === 'string' ? o.archiveId : archiveResult.archive.id,
+    archive: archiveResult.archive,
+  };
+
+  return { snapshot, warnings: [...warnings, ...archiveResult.warnings] };
+}
+
+export function generateUniqueArchiveName(baseName: string, existingArchives: CampaignArchive[], counter = 1): string {
+  const candidate = counter === 1 ? baseName : `${baseName} (导入 ${counter})`;
+  if (!existingArchives.some(a => a.name === candidate)) {
+    return candidate;
+  }
+  return generateUniqueArchiveName(baseName, existingArchives, counter + 1);
+}
+
+export interface MergeArchiveOptions {
+  strategy: CampaignArchiveConflictStrategy;
+  existingArchives: CampaignArchive[];
+  incomingArchive: CampaignArchive;
+  incomingSnapshots: CampaignArchiveSnapshot[];
+}
+
+export interface MergeArchiveResult {
+  mergedArchives: CampaignArchive[];
+  logEntries: { action: OperationLogEntry['action']; detail: string; archiveName?: string }[];
+  resolvedArchiveId: string | null;
+  nameMap: Map<string, string>;
+}
+
+export function mergeArchives(options: MergeArchiveOptions): MergeArchiveResult {
+  const { strategy, existingArchives, incomingArchive, incomingSnapshots } = options;
+
+  if (!['overwrite', 'keep_both', 'metadata_only'].includes(strategy)) {
+    throw new Error(`无效的冲突处理策略: ${strategy}`);
+  }
+
+  const merged = [...existingArchives];
+  const existingNames = new Set(existingArchives.map((a) => a.name));
+  const existingIds = new Set(existingArchives.map((a) => a.id));
+  const logEntries: MergeArchiveResult['logEntries'] = [];
+  const nameMap = new Map<string, string>();
+
+  let resolvedArchiveId: string | null = null;
+
+  const nameConflict = existingNames.has(incomingArchive.name);
+  let finalName = incomingArchive.name;
+  let finalId = incomingArchive.id;
+
+  if (existingIds.has(incomingArchive.id)) {
+    finalId = `arch_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  if (nameConflict) {
+    if (strategy === 'overwrite') {
+      const idx = merged.findIndex((a) => a.name === incomingArchive.name);
+      if (idx >= 0) {
+        const oldId = merged[idx].id;
+        merged.splice(idx, 1);
+        existingNames.delete(incomingArchive.name);
+        existingIds.delete(oldId);
+      }
+      logEntries.push({
+        action: 'archive_import_conflict_overwrite',
+        detail: `覆盖同名档案「${incomingArchive.name}」`,
+        archiveName: incomingArchive.name,
+      });
+      finalName = incomingArchive.name;
+    } else if (strategy === 'keep_both') {
+      finalName = generateUniqueArchiveName(incomingArchive.name, merged);
+      logEntries.push({
+        action: 'archive_import_conflict_keep_both',
+        detail: `并存档案「${incomingArchive.name}」→「${finalName}」`,
+        archiveName: finalName,
+      });
+    } else if (strategy === 'metadata_only') {
+      const idx = merged.findIndex((a) => a.name === incomingArchive.name);
+      if (idx >= 0) {
+        const existing = merged[idx];
+        const updatedArchive: CampaignArchive = {
+          ...existing,
+          name: incomingArchive.name,
+          description: incomingArchive.description || existing.description,
+          notes: incomingArchive.notes || existing.notes,
+          updatedAt: Date.now(),
+        };
+        merged[idx] = updatedArchive;
+        logEntries.push({
+          action: 'archive_import_conflict_metadata_only',
+          detail: `仅更新元数据「${incomingArchive.name}」`,
+          archiveName: incomingArchive.name,
+        });
+        resolvedArchiveId = existing.id;
+        nameMap.set(incomingArchive.id, existing.id);
+        return {
+          mergedArchives: merged,
+          logEntries,
+          resolvedArchiveId,
+          nameMap,
+        };
+      }
+    }
+  } else {
+    logEntries.push({
+      action: 'archive_import',
+      detail: `导入档案「${incomingArchive.name}」`,
+      archiveName: incomingArchive.name,
+    });
+  }
+
+  const newArchive: CampaignArchive = {
+    ...JSON.parse(JSON.stringify(incomingArchive)),
+    id: finalId,
+    name: finalName,
+    updatedAt: Date.now(),
+  };
+
+  merged.push(newArchive);
+  existingNames.add(finalName);
+  existingIds.add(finalId);
+  nameMap.set(incomingArchive.id, finalId);
+  resolvedArchiveId = finalId;
+
+  return {
+    mergedArchives: merged,
+    logEntries,
+    resolvedArchiveId,
+    nameMap,
+  };
+}
+
+export function importArchivePackageWithMerge(
+  jsonStr: string,
+  existingArchives: CampaignArchive[],
+  strategy: CampaignArchiveConflictStrategy,
+): CampaignArchiveImportResult {
+  const parseResult = parseArchivePackage(jsonStr);
+  if (!parseResult.pkg) {
+    return {
+      success: false,
+      errors: parseResult.errors,
+      warnings: parseResult.warnings,
+      mergedArchives: existingArchives,
+      logEntries: [{ action: 'archive_import_failed', detail: `档案包解析失败：${parseResult.errors.join('; ')}` }],
+      resolvedArchiveId: null,
+    };
+  }
+
+  const pkg = parseResult.pkg;
+  const warnings: string[] = [...parseResult.warnings];
+  const allLogEntries: MergeArchiveResult['logEntries'] = [];
+
+  const mergeResult = mergeArchives({
+    strategy,
+    existingArchives,
+    incomingArchive: pkg.archive,
+    incomingSnapshots: pkg.snapshots,
+  });
+
+  allLogEntries.push(...mergeResult.logEntries);
+
+  if (pkg.archive.campaign.levels.length > 0) {
+    warnings.push(`档案「${pkg.archive.name}」包含 ${pkg.archive.campaign.levels.length} 个关卡`);
+  }
+
+  const skipped = mergeResult.logEntries.filter((e) => e.action === 'archive_import_conflict_keep_both').length;
+  const overwritten = mergeResult.logEntries.filter((e) => e.action === 'archive_import_conflict_overwrite').length;
+  const metadataOnly = mergeResult.logEntries.filter((e) => e.action === 'archive_import_conflict_metadata_only').length;
+
+  if (overwritten > 0) warnings.push(`共覆盖 ${overwritten} 个同名档案`);
+  if (skipped > 0) warnings.push(`共并存 ${skipped} 个同名档案`);
+  if (metadataOnly > 0) warnings.push(`共更新 ${metadataOnly} 个档案元数据`);
+
+  allLogEntries.unshift({
+    action: 'archive_import',
+    detail: `导入档案包成功：共 1 个档案`,
+  });
+
+  return {
+    success: true,
+    errors: [],
+    warnings,
+    mergedArchives: mergeResult.mergedArchives,
+    logEntries: allLogEntries,
+    resolvedArchiveId: mergeResult.resolvedArchiveId,
+  };
+}
+

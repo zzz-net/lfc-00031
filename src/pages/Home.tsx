@@ -1,6 +1,7 @@
 import { useEffect } from 'react';
 import { useEditorStore } from '@/store/useEditorStore';
 import { useCampaignStore } from '@/store/useCampaignStore';
+import { useCampaignArchiveStore } from '@/store/useCampaignArchiveStore';
 import Toolbar from '@/components/Toolbar';
 import Toolbox from '@/components/Toolbox';
 import GridEditor from '@/components/GridEditor';
@@ -13,6 +14,8 @@ import LevelMetaEditor from '@/components/LevelMetaEditor';
 import CampaignImportConflictDialog from '@/components/CampaignImportConflictDialog';
 import ImportConflictDialog from '@/components/ImportConflictDialog';
 import PackageImportConflictDialog from '@/components/PackageImportConflictDialog';
+import CampaignArchivePanel from '@/components/CampaignArchivePanel';
+import ArchiveImportConflictDialog from '@/components/ArchiveImportConflictDialog';
 
 export default function Home() {
   const restoreFromStorage = useEditorStore((s) => s.restoreFromStorage);
@@ -20,12 +23,14 @@ export default function Home() {
   const undo = useEditorStore((s) => s.undo);
   const redo = useEditorStore((s) => s.redo);
   const restoreCampaignsFromStorage = useCampaignStore((s) => s.restoreFromStorage);
+  const restoreArchivesFromStorage = useCampaignArchiveStore((s) => s.restoreFromStorage);
 
   useEffect(() => {
     restoreFromStorage();
     restoreSnapshotsFromStorage();
     restoreCampaignsFromStorage();
-  }, [restoreFromStorage, restoreSnapshotsFromStorage, restoreCampaignsFromStorage]);
+    restoreArchivesFromStorage();
+  }, [restoreFromStorage, restoreSnapshotsFromStorage, restoreCampaignsFromStorage, restoreArchivesFromStorage]);
 
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
@@ -57,6 +62,8 @@ export default function Home() {
       <ImportConflictDialog />
       <PackageImportConflictDialog />
       <CampaignImportConflictDialog />
+      <CampaignArchivePanel />
+      <ArchiveImportConflictDialog />
       <Toast />
     </div>
   );

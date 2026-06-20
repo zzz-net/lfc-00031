@@ -14,6 +14,7 @@ import type {
   UnlockCondition,
   LevelPlayResult,
 } from '@/types';
+import { useCampaignArchiveStore } from './useCampaignArchiveStore';
 import {
   CAMPAIGN_STORAGE_KEY,
   CAMPAIGN_PROGRESS_KEY,
@@ -1002,5 +1003,27 @@ useCampaignStore.subscribe(
       a.activeCampaignId === b.activeCampaignId &&
       a.selectedLevelId === b.selectedLevelId &&
       a.operationLog === b.operationLog,
+  }
+);
+
+let archiveSyncTimer: ReturnType<typeof setTimeout>;
+
+useCampaignStore.subscribe(
+  (state) => ({
+    campaigns: state.campaigns,
+    progressMap: state.progressMap,
+    activeCampaignId: state.activeCampaignId,
+  }),
+  () => {
+    clearTimeout(archiveSyncTimer);
+    archiveSyncTimer = setTimeout(() => {
+      useCampaignArchiveStore.getState().syncActiveArchiveFromStores();
+    }, 300);
+  },
+  {
+    equalityFn: (a, b) =>
+      a.campaigns === b.campaigns &&
+      a.progressMap === b.progressMap &&
+      a.activeCampaignId === b.activeCampaignId,
   }
 );
