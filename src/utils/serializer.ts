@@ -380,25 +380,67 @@ export function exportSnapshotPackage(params: {
   return JSON.stringify(envelope, null, 2);
 }
 
-function validateSnapshotPackageStructure(obj: unknown): { ok: boolean; errors: string[] } {
+function compareSemver(a: string, b: string): number {
+  const aParts = a.split('.').map(Number);
+  const bParts = b.split('.').map(Number);
+  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
+    const aVal = aParts[i] || 0;
+    const bVal = bParts[i] || 0;
+    if (aVal > bVal) return 1;
+    if (aVal < bVal) return -1;
+  }
+  return 0;
+}
+
+function checkVersionCompatibility(pkgVersion: string): { compatible: boolean; warnings: string[]; errors: string[] } {
+  const warnings: string[] = [];
   const errors: string[] = [];
+
+  const currentMajor = SNAPSHOT_PACKAGE_VERSION.split('.')[0];
+  const pkgMajor = pkgVersion.split('.')[0];
+
+  if (currentMajor !== pkgMajor) {
+    errors.push(`快照包版本 ${pkgVersion} 与当前版本 ${SNAPSHOT_PACKAGE_VERSION} 主版本号不兼容，无法导入`);
+    return { compatible: false, warnings, errors };
+  }
+
+  const cmp = compareSemver(pkgVersion, SNAPSHOT_PACKAGE_VERSION);
+  if (cmp > 0) {
+    warnings.push(`快照包版本 ${pkgVersion} 高于当前版本 ${SNAPSHOT_PACKAGE_VERSION}，部分字段可能无法识别，将尝试兼容导入`);
+  } else if (cmp < 0) {
+    warnings.push(`快照包版本 ${pkgVersion} 低于当前版本 ${SNAPSHOT_PACKAGE_VERSION}，将按旧格式兼容导入`);
+  }
+
+  return { compatible: true, warnings, errors };
+}
+
+function validateSnapshotPackageStructure(obj: unknown): { ok: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
   if (!obj || typeof obj !== 'object') {
-    return { ok: false, errors: ['快照包根元素必须是对象'] };
+    return { ok: false, errors: ['快照包根元素必须是对象'], warnings };
   }
   const envelope = obj as Record<string, unknown>;
 
   if (envelope._type !== PACKAGE_TYPE_IDENTIFIER) {
-    return { ok: false, errors: ['不是合法的快照包文件（缺少类型标识）'] };
+    return { ok: false, errors: ['不是合法的快照包文件（缺少类型标识）'], warnings };
   }
 
   const data = envelope.data as Record<string, unknown> | undefined;
   if (!data || typeof data !== 'object') {
-    return { ok: false, errors: ['快照包缺少 data 字段'] };
+    return { ok: false, errors: ['快照包缺少 data 字段'], warnings };
   }
 
   if (typeof data.packageVersion !== 'string') {
     errors.push('缺少 packageVersion 或类型错误');
+  } else {
+    const versionCheck = checkVersionCompatibility(data.packageVersion);
+    if (!versionCheck.compatible) {
+      errors.push(...versionCheck.errors);
+    }
+    warnings.push(...versionCheck.warnings);
   }
+
   if (typeof data.exportedAt !== 'number') {
     errors.push('缺少 exportedAt 或类型错误');
   }
@@ -415,7 +457,7 @@ function validateSnapshotPackageStructure(obj: unknown): { ok: boolean; errors: 
     errors.push('缺少 operationLog 或不是数组');
   }
 
-  return { ok: errors.length === 0, errors };
+  return { ok: errors.length === 0, errors, warnings };
 }
 
 function validateLevelInSnapshot(obj: unknown): string[] {
@@ -441,27 +483,32 @@ function validateSnapshot(obj: unknown, index: number): string[] {
   } else {
     errors.push(...validateLevelInSnapshot(s.level));
   }
-  if (!Array.isArray(s.past)) errors.push(`快照 ${index + 1}: past 不是数组`);
-  if (!Array.isArray(s.future)) errors.push(`快照 ${index + 1}: future 不是数组`);
+  if (s.past !== undefined && !Array.isArray(s.past)) {
+    errors.push(`快照 ${index + 1}: past 不是数组`);
+  }
+  if (s.future !== undefined && !Array.isArray(s.future)) {
+    errors.push(`快照 ${index + 1}: future 不是数组`);
+  }
   return errors;
 }
 
-export function parseSnapshotPackage(str: string): { pkg: SnapshotPackage | null; errors: string[] } {
+export function parseSnapshotPackage(str: string): { pkg: SnapshotPackage | null; errors: string[]; warnings: string[] } {
   let parsed: unknown;
   try {
     parsed = JSON.parse(str);
   } catch {
-    return { pkg: null, errors: ['JSON 解析失败：格式不合法'] };
+    return { pkg: null, errors: ['JSON 解析失败：格式不合法'], warnings: [] };
   }
 
   const structResult = validateSnapshotPackageStructure(parsed);
   if (!structResult.ok) {
-    return { pkg: null, errors: structResult.errors };
+    return { pkg: null, errors: structResult.errors, warnings: structResult.warnings };
   }
 
   const envelope = parsed as { _type: string; data: SnapshotPackage };
   const pkg = envelope.data;
   const allErrors: string[] = [];
+  const allWarnings: string[] = [...structResult.warnings];
 
   const levelErrors = validateLevelInSnapshot(pkg.currentLevel);
   allErrors.push(...levelErrors);
@@ -494,10 +541,10 @@ export function parseSnapshotPackage(str: string): { pkg: SnapshotPackage | null
   }
 
   if (allErrors.length > 0) {
-    return { pkg: null, errors: allErrors };
+    return { pkg: null, errors: allErrors, warnings: allWarnings };
   }
 
-  return { pkg, errors: [] };
+  return { pkg, errors: [], warnings: allWarnings };
 }
 
 function generateUniqueName(baseName: string, existingNames: Set<string>, counter = 1): string {
@@ -610,14 +657,14 @@ export function importSnapshotPackageWithMerge(
     return {
       success: false,
       errors: parseResult.errors,
-      warnings: [],
+      warnings: parseResult.warnings,
       mergedSnapshots: existingSnapshots,
       logEntries: [{ action: 'import_package_failed', detail: `快照包解析失败：${parseResult.errors.join('; ')}` }],
     };
   }
 
   const pkg = parseResult.pkg;
-  const warnings: string[] = [];
+  const warnings: string[] = [...parseResult.warnings];
   const allLogEntries: MergeSnapshotResult['logEntries'] = [];
 
   const mergeResult = mergeSnapshots({

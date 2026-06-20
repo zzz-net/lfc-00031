@@ -203,7 +203,7 @@ export interface SnapshotPackageImportResult {
 }
 
 export const DATA_VERSION = '1.0.0';
-export const SNAPSHOT_PACKAGE_VERSION = '1.0.0';
+export const SNAPSHOT_PACKAGE_VERSION = '1.1.0';
 export const STORAGE_KEY = 'puzzle-editor:v1:state';
 export const SNAPSHOT_STORAGE_KEY = 'puzzle-editor:v1:snapshots';
 export const OPERATION_LOG_KEY = 'puzzle-editor:v1:operation-log';

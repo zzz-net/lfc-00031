@@ -763,10 +763,16 @@ export const useEditorStore = create<EditorState>()(
         for (const err of parseResult.errors) {
           get().addToast('error', `导入失败：${err}`);
         }
+        for (const warn of parseResult.warnings) {
+          get().addToast('warning', warn);
+        }
         get().addOperationLog('import_package_failed', parseResult.errors.join('; '));
         return;
       }
       const pkg = parseResult.pkg;
+      for (const warn of parseResult.warnings) {
+        get().addToast('warning', warn);
+      }
       const { snapshots } = get();
       const existingNames = new Set(snapshots.map((s) => s.name));
       const conflicts: string[] = [];
@@ -808,6 +814,10 @@ export const useEditorStore = create<EditorState>()(
         operationLog: JSON.parse(JSON.stringify(operationLog)) as OperationLogEntry[],
       };
 
+      const parseResult = parseSnapshotPackage(pendingPackageJson);
+      const pkgFromParse = parseResult.pkg;
+      const originalPkgOperationLog = pkgFromParse?.operationLog ?? [];
+
       let importResult: SnapshotPackageImportResult;
       try {
         importResult = importSnapshotPackageWithMerge(pendingPackageJson, stateBefore.snapshots, strategy);
@@ -822,6 +832,9 @@ export const useEditorStore = create<EditorState>()(
       if (!importResult.success) {
         for (const err of importResult.errors) {
           get().addToast('error', `导入失败：${err}`);
+        }
+        for (const warn of importResult.warnings) {
+          get().addToast('warning', warn);
         }
         for (const log of importResult.logEntries) {
           get().addOperationLog(log.action, log.detail, undefined, log.snapshotName);
@@ -845,13 +858,21 @@ export const useEditorStore = create<EditorState>()(
         const resolvedActiveId = mergeResult.resolvedActiveId ?? pkg.activeSnapshotId;
         const finalSnapshots = importResult.mergedSnapshots;
 
+        const convertHistoryEntry = (entry: unknown): HistoryEntry => {
+          const e = entry as Record<string, unknown>;
+          if (e && 'level' in e) {
+            return e as unknown as HistoryEntry;
+          }
+          return { level: e as unknown as LevelData, validation: null };
+        };
+
         const newHistory: HistoryState = pkg.currentHistory;
-        const newPast: HistoryEntry[] = Array.isArray((newHistory.past?.[0] as unknown as HistoryEntry)?.level)
-          ? newHistory.past
-          : (newHistory.past as unknown as LevelData[]).map((l) => ({ level: l, validation: null }));
-        const newFuture: HistoryEntry[] = Array.isArray((newHistory.future?.[0] as unknown as HistoryEntry)?.level)
-          ? newHistory.future
-          : (newHistory.future as unknown as LevelData[] || []).map((l) => ({ level: l, validation: null }));
+        const newPast: HistoryEntry[] = Array.isArray(newHistory.past)
+          ? newHistory.past.map(convertHistoryEntry)
+          : [];
+        const newFuture: HistoryEntry[] = Array.isArray(newHistory.future)
+          ? newHistory.future.map(convertHistoryEntry)
+          : [];
         const newPresent: LevelData = {
           ...JSON.parse(JSON.stringify(newHistory.present)),
           updatedAt: Date.now(),
@@ -872,10 +893,27 @@ export const useEditorStore = create<EditorState>()(
             moveLogInvalidated: activeSnap.moveLogInvalidated,
             updatedAt: Date.now(),
           };
-          finalPast = JSON.parse(JSON.stringify(activeSnap.past));
-          finalFuture = JSON.parse(JSON.stringify(activeSnap.future));
+          finalPast = Array.isArray(activeSnap.past)
+            ? activeSnap.past.map(convertHistoryEntry)
+            : [];
+          finalFuture = Array.isArray(activeSnap.future)
+            ? activeSnap.future.map(convertHistoryEntry)
+            : [];
           finalLastValidation = activeSnap.lastValidation ? JSON.parse(JSON.stringify(activeSnap.lastValidation)) : null;
           finalActiveId = resolvedActiveId;
+
+          const presentTilesStr = JSON.stringify(finalPresent.tiles);
+          const activeSnapTilesStr = JSON.stringify(activeSnap.level.tiles);
+          if (presentTilesStr !== activeSnapTilesStr) {
+            throw new Error('导入后地图与激活快照不一致');
+          }
+          if (finalLastValidation && activeSnap.lastValidation) {
+            const v1 = JSON.stringify(finalLastValidation);
+            const v2 = JSON.stringify(activeSnap.lastValidation);
+            if (v1 !== v2) {
+              throw new Error('导入后校验结果与激活快照不一致');
+            }
+          }
         } else {
           finalPresent = newPresent;
           finalPast = newPast;
@@ -884,13 +922,50 @@ export const useEditorStore = create<EditorState>()(
           finalActiveId = null;
         }
 
+        const finalPastStr = JSON.stringify(finalPast);
+        const finalFutureStr = JSON.stringify(finalFuture);
+        const finalPresentStr = JSON.stringify(finalPresent);
+        const finalValidationStr = JSON.stringify(finalLastValidation);
+
+        if (finalPast.length > 0) {
+          const lastEntry = finalPast[finalPast.length - 1];
+          const prevPresent = JSON.stringify(lastEntry.level);
+          const currentPresent = JSON.stringify(finalPresent);
+          if (prevPresent === currentPresent) {
+            finalPast.pop();
+          }
+        }
+
+        const combinedOpLog = [...stateBefore.operationLog];
+
+        for (const log of originalPkgOperationLog) {
+          combinedOpLog.push({
+            id: genOpLogId(),
+            action: log.action,
+            detail: log.detail,
+            snapshotName: log.snapshotName,
+            timestamp: Date.now(),
+          } as OperationLogEntry);
+        }
+
+        for (const log of importResult.logEntries) {
+          combinedOpLog.push({
+            id: genOpLogId(),
+            action: log.action,
+            detail: log.detail,
+            snapshotName: log.snapshotName,
+            timestamp: Date.now(),
+          } as OperationLogEntry);
+        }
+
         set({
           snapshots: finalSnapshots,
-          past: finalPast,
-          present: finalPresent,
-          future: finalFuture,
-          lastValidation: finalLastValidation,
+          past: JSON.parse(finalPastStr),
+          present: JSON.parse(finalPresentStr),
+          future: JSON.parse(finalFutureStr),
+          lastValidation: finalLastValidation ? JSON.parse(finalValidationStr) : null,
           activeSnapshotId: finalActiveId,
+          operationLog: combinedOpLog,
           simulationState: null,
           isRecording: false,
           currentStepIndex: -1,
@@ -900,8 +975,15 @@ export const useEditorStore = create<EditorState>()(
           detectedConflictingSnapshotNames: [],
         });
 
-        for (const log of importResult.logEntries) {
-          get().addOperationLog(log.action, log.detail, undefined, log.snapshotName);
+        if (finalActiveId) {
+          const activeSnapAfter = finalSnapshots.find((s) => s.id === finalActiveId);
+          if (activeSnapAfter) {
+            const presentTiles = JSON.stringify(get().present.tiles);
+            const snapTiles = JSON.stringify(activeSnapAfter.level.tiles);
+            if (presentTiles !== snapTiles) {
+              throw new Error('导入后 activeSnapshotId 与当前地图不一致');
+            }
+          }
         }
 
         for (const warn of importResult.warnings) {
@@ -925,6 +1007,7 @@ export const useEditorStore = create<EditorState>()(
           future: stateBefore.future,
           lastValidation: stateBefore.lastValidation,
           activeSnapshotId: stateBefore.activeSnapshotId,
+          operationLog: stateBefore.operationLog,
           packageImportConflictOpen: false,
           pendingPackageImport: null,
           pendingPackageJson: null,
