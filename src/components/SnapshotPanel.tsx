@@ -16,6 +16,11 @@ const ACTION_LABELS: Record<OperationLogEntry['action'], string> = {
   import_package_conflict_rename: '✏️ 重命名导入',
   import_package_conflict_skip: '⏭️ 跳过同名',
   import_package_failed: '❌ 导入失败',
+  new_level: '📄 新建关卡',
+  load_sample: '📂 加载示例',
+  edit_level: '✏️ 编辑关卡',
+  import_level: '📥 导入关卡',
+  persist_restore: '🔄 恢复快照',
 };
 
 function SnapshotItem({ snap, isActive }: { snap: DraftSnapshot; isActive: boolean }) {

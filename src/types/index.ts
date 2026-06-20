@@ -157,7 +157,7 @@ export const TILE_TO_TOOL: Record<number, ToolId> = {
 
 export interface OperationLogEntry {
   id: string;
-  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new' | 'export_package' | 'import_package' | 'import_package_conflict_replace' | 'import_package_conflict_rename' | 'import_package_conflict_skip' | 'import_package_failed';
+  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new' | 'export_package' | 'import_package' | 'import_package_conflict_replace' | 'import_package_conflict_rename' | 'import_package_conflict_skip' | 'import_package_failed' | 'new_level' | 'load_sample' | 'edit_level' | 'import_level' | 'persist_restore';
   snapshotId?: string;
   snapshotName?: string;
   timestamp: number;

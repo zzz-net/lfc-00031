@@ -2359,7 +2359,7 @@ describe('【回归】状态一致性：activeSnapshotId、lastValidation、当�
     expect(s().past.length).toBeGreaterThan(0);
   });
 
-  it('导入后修改地图，lastValidation 自动置空，activeSnapshotId 不变', () => {
+  it('导入后修改地图，lastValidation 自动置空，activeSnapshotId 也被清空', () => {
     const samples = createSampleLevels();
     const level = samples[0];
     useEditorStore.setState({
@@ -2396,6 +2396,675 @@ describe('【回归】状态一致性：activeSnapshotId、lastValidation、当�
 
     s().setTileAt(0, 0, TileType.FLOOR);
     expect(s().lastValidation).toBeNull();
-    expect(s().activeSnapshotId).toBe(activeIdAfterImport);
+    expect(s().activeSnapshotId).toBeNull();
+  });
+});
+
+describe('【新能力】导入后持续编辑：全链路同步', () => {
+  it('导入快照包后改图，activeSnapshotId 被清空，地图和历史正常更新', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().validate();
+    s().saveSnapshot('base');
+    const baseSnapId = s().snapshots[0].id;
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    expect(s().activeSnapshotId).not.toBeNull();
+    expect(s().snapshots.length).toBe(1);
+    const importedSnapId = s().activeSnapshotId!;
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    expect(s().activeSnapshotId).toBeNull();
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(s().past.length).toBeGreaterThan(0);
+    expect(s().lastValidation).toBeNull();
+
+    s().undo();
+    expect(s().present.tiles[0][0]).not.toBe(TileType.FLOOR);
+    expect(s().activeSnapshotId).toBeNull();
+
+    s().redo();
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(s().activeSnapshotId).toBeNull();
+
+    const baseSnapAfter = s().snapshots.find(s => s.id === importedSnapId);
+    expect(baseSnapAfter).not.toBeUndefined();
+    expect(baseSnapAfter!.level.tiles[0][0]).not.toBe(TileType.FLOOR);
+  });
+
+  it('导入后改图再存新快照，新快照成为 active，历史链路完整', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().saveSnapshot('v1');
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    const v1Snap = s().snapshots.find(ss => ss.name.startsWith('v1') || ss.name === 'v1');
+    expect(v1Snap).not.toBeUndefined();
+    const v1PastLen = v1Snap!.past.length;
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().validate();
+    const newSnap = s().saveSnapshot('v2-modified');
+
+    expect(s().activeSnapshotId).toBe(newSnap.id);
+    expect(newSnap.past.length).toBeGreaterThan(v1PastLen);
+    expect(newSnap.level.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(newSnap.lastValidation).not.toBeNull();
+    expect(s().snapshots.length).toBe(2);
+
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(s().lastValidation).not.toBeNull();
+  });
+
+  it('导入后撤销重做都保持 activeSnapshotId 为空（不自动恢复旧快照标签）', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().saveSnapshot('original');
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    const activeIdAfterImport = s().activeSnapshotId;
+    expect(activeIdAfterImport).not.toBeNull();
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    expect(s().activeSnapshotId).toBeNull();
+
+    s().undo();
+    expect(s().activeSnapshotId).toBeNull();
+
+    s().redo();
+    expect(s().activeSnapshotId).toBeNull();
+  });
+});
+
+describe('【新能力】跨重启恢复：刷新后状态完整', () => {
+  it('导入快照包后持久化，再从存储恢复，快照列表、活跃ID、操作日志都完整', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().validate();
+    s().saveSnapshot('snap-a');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().saveSnapshot('snap-b');
+    s().setActiveSnapshotId(s().snapshots[0].id);
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    localStorage.clear();
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    vi.advanceTimersByTime(500);
+
+    const snapCountBefore = s().snapshots.length;
+    const activeIdBefore = s().activeSnapshotId;
+    const opLogLenBefore = s().operationLog.length;
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    expect(s().snapshots.length).toBe(0);
+    expect(s().activeSnapshotId).toBeNull();
+
+    s().restoreSnapshotsFromStorage();
+
+    expect(s().snapshots.length).toBe(snapCountBefore);
+    expect(s().activeSnapshotId).toBe(activeIdBefore);
+    expect(s().operationLog.length).toBeGreaterThanOrEqual(opLogLenBefore);
+
+    const activeSnap = s().snapshots.find(ss => ss.id === s().activeSnapshotId);
+    expect(activeSnap).not.toBeUndefined();
+  });
+
+  it('导入后编辑并持久化，刷新后 activeSnapshotId 保持为空（因为已修改）', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().saveSnapshot('base');
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    localStorage.clear();
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    expect(s().activeSnapshotId).not.toBeNull();
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    expect(s().activeSnapshotId).toBeNull();
+
+    vi.advanceTimersByTime(500);
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().restoreSnapshotsFromStorage();
+
+    expect(s().activeSnapshotId).toBeNull();
+    expect(s().snapshots.length).toBe(1);
+  });
+
+  it('恢复后快照可正常回滚，历史链路完整', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().validate();
+    const origTile = level.tiles[0][0];
+    s().saveSnapshot('v1');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().saveSnapshot('v2');
+
+    vi.advanceTimersByTime(500);
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().restoreSnapshotsFromStorage();
+    s().restoreFromStorage();
+
+    expect(s().snapshots.length).toBe(2);
+
+    const v1Snap = s().snapshots.find(ss => ss.name === 'v1');
+    expect(v1Snap).not.toBeUndefined();
+
+    s().rollbackToSnapshot(v1Snap!.id);
+    expect(s().present.tiles[0][0]).toBe(origTile);
+    expect(s().activeSnapshotId).toBe(v1Snap!.id);
+    expect(s().lastValidation).not.toBeNull();
+  });
+});
+
+describe('【新能力】冲突分支后再编辑', () => {
+  it('replace 策略冲突导入后，继续编辑并保存新快照，历史完整', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    const modifiedLevel = JSON.parse(JSON.stringify(level));
+    modifiedLevel.tiles[0][0] = TileType.FLOOR;
+
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().saveSnapshot('alpha');
+    const localAlphaId = s().snapshots[0].id;
+
+    const currentHistory: HistoryState = {
+      past: [{ level: modifiedLevel, validation: null }],
+      present: modifiedLevel,
+      future: [],
+      lastValidation: null,
+    };
+    const incomingSnapshots: DraftSnapshot[] = [{
+      id: 'remote-alpha',
+      name: 'alpha',
+      createdAt: Date.now(),
+      level: JSON.parse(JSON.stringify(modifiedLevel)),
+      moveLog: [],
+      moveLogInvalidated: false,
+      past: [{ level: modifiedLevel, validation: null }],
+      future: [],
+      lastValidation: null,
+    }];
+
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: modifiedLevel,
+      currentHistory,
+      lastValidation: null,
+      snapshots: incomingSnapshots,
+      activeSnapshotId: 'remote-alpha',
+      operationLog: [],
+    });
+
+    s().requestPackageImport(pkgJson);
+    expect(s().packageImportConflictOpen).toBe(true);
+
+    const result = s().resolvePackageImport('replace');
+    expect(result).toBe(true);
+    expect(s().snapshots.length).toBe(1);
+
+    const newAlpha = s().snapshots.find(ss => ss.name === 'alpha');
+    expect(newAlpha).not.toBeUndefined();
+    expect(newAlpha!.id).not.toBe(localAlphaId);
+    expect(newAlpha!.level.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(s().activeSnapshotId).toBe(newAlpha!.id);
+
+    s().setTileAt(1, 1, TileType.WALL);
+    expect(s().activeSnapshotId).toBeNull();
+    expect(s().present.tiles[1][1]).toBe(TileType.WALL);
+    expect(s().past.length).toBeGreaterThan(0);
+
+    const newSnap = s().saveSnapshot('alpha-fork');
+    expect(s().activeSnapshotId).toBe(newSnap.id);
+    expect(newSnap.level.tiles[1][1]).toBe(TileType.WALL);
+    expect(newSnap.past.length).toBeGreaterThan(newAlpha!.past.length);
+  });
+
+  it('rename 策略冲突导入后，两个分支都可继续编辑、独立保存', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    const modifiedLevel = JSON.parse(JSON.stringify(level));
+    modifiedLevel.tiles[0][0] = TileType.FLOOR;
+
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().saveSnapshot('alpha');
+    const localAlphaId = s().snapshots[0].id;
+    const localAlphaTiles = JSON.stringify(s().snapshots[0].level.tiles);
+
+    const currentHistory: HistoryState = {
+      past: [],
+      present: modifiedLevel,
+      future: [],
+      lastValidation: null,
+    };
+    const incomingSnapshots: DraftSnapshot[] = [{
+      id: 'remote-alpha',
+      name: 'alpha',
+      createdAt: Date.now(),
+      level: JSON.parse(JSON.stringify(modifiedLevel)),
+      moveLog: [],
+      moveLogInvalidated: false,
+      past: [],
+      future: [],
+      lastValidation: null,
+    }];
+
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: modifiedLevel,
+      currentHistory,
+      lastValidation: null,
+      snapshots: incomingSnapshots,
+      activeSnapshotId: 'remote-alpha',
+      operationLog: [],
+    });
+
+    s().requestPackageImport(pkgJson);
+    const result = s().resolvePackageImport('rename');
+    expect(result).toBe(true);
+    expect(s().snapshots.length).toBe(2);
+
+    const localAlpha = s().snapshots.find(ss => ss.id === localAlphaId);
+    expect(localAlpha).not.toBeUndefined();
+    expect(localAlpha!.name).toBe('alpha');
+    expect(JSON.stringify(localAlpha!.level.tiles)).toBe(localAlphaTiles);
+
+    const renamedAlpha = s().snapshots.find(ss => ss.name.startsWith('alpha (导入 '));
+    expect(renamedAlpha).not.toBeUndefined();
+    expect(renamedAlpha!.level.tiles[0][0]).toBe(TileType.FLOOR);
+
+    s().rollbackToSnapshot(localAlphaId);
+    expect(s().activeSnapshotId).toBe(localAlphaId);
+    s().setTileAt(2, 2, TileType.WALL);
+    s().saveSnapshot('alpha-local-v2');
+
+    s().rollbackToSnapshot(renamedAlpha!.id);
+    expect(s().activeSnapshotId).toBe(renamedAlpha!.id);
+    s().setTileAt(3, 3, TileType.TARGET);
+    s().saveSnapshot('alpha-remote-v2');
+
+    expect(s().snapshots.length).toBe(4);
+  });
+
+  it('skip 策略冲突导入后，本地快照保留不变，可继续编辑', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    const modifiedLevel = JSON.parse(JSON.stringify(level));
+    modifiedLevel.tiles[0][0] = TileType.FLOOR;
+
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().saveSnapshot('alpha');
+    const localAlphaId = s().snapshots[0].id;
+    const localAlphaTiles = JSON.stringify(s().snapshots[0].level.tiles);
+
+    const currentHistory: HistoryState = {
+      past: [],
+      present: modifiedLevel,
+      future: [],
+      lastValidation: null,
+    };
+    const incomingSnapshots: DraftSnapshot[] = [
+      {
+        id: 'remote-alpha',
+        name: 'alpha',
+        createdAt: Date.now(),
+        level: JSON.parse(JSON.stringify(modifiedLevel)),
+        moveLog: [],
+        moveLogInvalidated: false,
+        past: [],
+        future: [],
+        lastValidation: null,
+      },
+      {
+        id: 'remote-beta',
+        name: 'beta',
+        createdAt: Date.now(),
+        level: JSON.parse(JSON.stringify(level)),
+        moveLog: [],
+        moveLogInvalidated: false,
+        past: [],
+        future: [],
+        lastValidation: null,
+      },
+    ];
+
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: modifiedLevel,
+      currentHistory,
+      lastValidation: null,
+      snapshots: incomingSnapshots,
+      activeSnapshotId: 'remote-beta',
+      operationLog: [],
+    });
+
+    s().requestPackageImport(pkgJson);
+    const result = s().resolvePackageImport('skip');
+    expect(result).toBe(true);
+    expect(s().snapshots.length).toBe(2);
+
+    const alphaAfter = s().snapshots.find(ss => ss.id === localAlphaId);
+    expect(alphaAfter).not.toBeUndefined();
+    expect(alphaAfter!.name).toBe('alpha');
+    expect(JSON.stringify(alphaAfter!.level.tiles)).toBe(localAlphaTiles);
+
+    const betaAfter = s().snapshots.find(ss => ss.name === 'beta');
+    expect(betaAfter).not.toBeUndefined();
+
+    expect(s().activeSnapshotId).toBe(betaAfter!.id);
+
+    s().rollbackToSnapshot(localAlphaId);
+    s().setTileAt(1, 1, TileType.WALL);
+    s().saveSnapshot('alpha-local-v2');
+
+    expect(s().snapshots.length).toBe(3);
+  });
+});
+
+describe('【新能力】导出再导入后继续撤销/重做', () => {
+  it('导出有历史的快照包，导入后 undo/redo 历史完整可用', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().setTileAt(1, 0, TileType.FLOOR);
+    s().setTileAt(2, 0, TileType.FLOOR);
+    expect(s().past.length).toBe(3);
+    expect(s().canUndo()).toBe(true);
+    expect(s().canRedo()).toBe(false);
+
+    s().undo();
+    s().undo();
+    expect(s().past.length).toBe(1);
+    expect(s().future.length).toBe(2);
+    expect(s().canRedo()).toBe(true);
+
+    s().saveSnapshot('with-history');
+    const snapPastLen = s().snapshots[0].past.length;
+    const snapFutureLen = s().snapshots[0].future.length;
+    expect(snapPastLen).toBe(1);
+    expect(snapFutureLen).toBe(2);
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    expect(s().past.length).toBe(snapPastLen);
+    expect(s().future.length).toBe(snapFutureLen);
+    expect(s().canUndo()).toBe(true);
+    expect(s().canRedo()).toBe(true);
+
+    const tilesBeforeUndo = JSON.stringify(s().present.tiles);
+    s().undo();
+    expect(JSON.stringify(s().present.tiles)).not.toBe(tilesBeforeUndo);
+    expect(s().future.length).toBe(snapFutureLen + 1);
+
+    s().redo();
+    s().redo();
+    s().redo();
+    expect(s().present.tiles[0][2]).toBe(TileType.FLOOR);
+    expect(s().canRedo()).toBe(false);
+  });
+
+  it('导入后继续编辑新增历史，与导入的历史无缝衔接', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const pastLenBeforeExport = s().past.length;
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: null,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    expect(s().past.length).toBe(pastLenBeforeExport);
+
+    s().setTileAt(1, 1, TileType.WALL);
+    s().setTileAt(2, 2, TileType.TARGET);
+
+    expect(s().past.length).toBe(pastLenBeforeExport + 2);
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(s().present.tiles[1][1]).toBe(TileType.WALL);
+    expect(s().present.tiles[2][2]).toBe(TileType.TARGET);
+
+    s().undo();
+    expect(s().present.tiles[2][2]).not.toBe(TileType.TARGET);
+    s().undo();
+    expect(s().present.tiles[1][1]).not.toBe(TileType.WALL);
+    s().undo();
+    expect(s().present.tiles[0][0]).not.toBe(TileType.FLOOR);
+
+    expect(s().canUndo()).toBe(false);
+    expect(s().canRedo()).toBe(true);
+  });
+
+  it('回滚到导入的快照后，该快照的历史栈完整，撤销重做正常', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    const origTile00 = level.tiles[0][0];
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().setTileAt(1, 0, TileType.FLOOR);
+    s().saveSnapshot('two-floors');
+    const twoFloorsSnap = s().snapshots[0];
+    expect(twoFloorsSnap.past.length).toBe(2);
+    expect(twoFloorsSnap.future.length).toBe(0);
+
+    s().setTileAt(2, 0, TileType.FLOOR);
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    const importedTwoFloors = s().snapshots.find(ss => ss.name === 'two-floors');
+    expect(importedTwoFloors).not.toBeUndefined();
+
+    s().rollbackToSnapshot(importedTwoFloors!.id);
+
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(s().present.tiles[0][1]).toBe(TileType.FLOOR);
+    expect(s().present.tiles[0][2]).not.toBe(TileType.FLOOR);
+    expect(s().past.length).toBe(2);
+    expect(s().future.length).toBe(0);
+    expect(s().canUndo()).toBe(true);
+    expect(s().canRedo()).toBe(false);
+
+    s().undo();
+    expect(s().present.tiles[0][1]).not.toBe(TileType.FLOOR);
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+
+    s().undo();
+    expect(s().present.tiles[0][0]).toBe(origTile00);
+    expect(s().canUndo()).toBe(false);
+
+    s().redo();
+    s().redo();
+    expect(s().present.tiles[0][1]).toBe(TileType.FLOOR);
   });
 });

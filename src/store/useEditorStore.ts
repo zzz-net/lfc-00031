@@ -145,6 +145,8 @@ export const useEditorStore = create<EditorState>()(
         currentStepIndex: -1,
         activeSnapshotId: null,
       });
+      get().addOperationLog('new_level', `创建 ${width}×${height} 新关卡`);
+      get().persistSnapshots();
       get().addToast('info', `已创建 ${width}×${height} 新关卡`);
     },
 
@@ -164,6 +166,8 @@ export const useEditorStore = create<EditorState>()(
         currentStepIndex: -1,
         activeSnapshotId: null,
       });
+      get().addOperationLog('load_sample', `加载样例「${samples[index].name}」`);
+      get().persistSnapshots();
       get().addToast('success', `已加载样例：${samples[index].name}`);
     },
 
@@ -172,14 +176,20 @@ export const useEditorStore = create<EditorState>()(
       const newTiles = setTile(present.tiles, x, y, tile);
       const updated = rebuildDerivedFromTiles({ ...present, tiles: newTiles, updatedAt: Date.now() });
       const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
-      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
+      set({
+        past: newPast,
+        present: newPresent,
+        future: [],
+        lastValidation: null,
+        activeSnapshotId: null,
+      });
     },
 
     resizeLevelTo: (width: number, height: number) => {
       const { present, past, lastValidation } = get();
       const updated = resizeLevel(present, width, height);
       const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, { ...updated, updatedAt: Date.now() });
-      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null, activeSnapshotId: null });
       get().addToast('info', `地图已调整为 ${width}×${height}`);
     },
 
@@ -199,7 +209,7 @@ export const useEditorStore = create<EditorState>()(
         get().addToast('warning', '规则已变更，已有解法步骤标记为失效，请重新录制');
       }
       const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
-      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null, activeSnapshotId: null });
     },
 
     addSwitchDoorRule: (rule: SwitchDoorRule) => {
@@ -218,7 +228,7 @@ export const useEditorStore = create<EditorState>()(
         get().addToast('warning', '机关规则已变更，解法步骤已标记失效');
       }
       const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
-      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null, activeSnapshotId: null });
     },
 
     removeSwitchDoorRule: (index: number) => {
@@ -236,7 +246,7 @@ export const useEditorStore = create<EditorState>()(
         get().addToast('warning', '机关规则已变更，解法步骤已标记失效');
       }
       const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, updated);
-      set({ past: newPast, present: newPresent, future: [], lastValidation: null });
+      set({ past: newPast, present: newPresent, future: [], lastValidation: null, activeSnapshotId: null });
     },
 
     setSelectedTool: (tool: ToolId) => {
@@ -291,6 +301,7 @@ export const useEditorStore = create<EditorState>()(
         present: newPresent,
         future: [],
         lastValidation: result,
+        activeSnapshotId: null,
       });
       get().addToast('success', '录制已开始，使用方向键或按钮移动');
     },
@@ -322,6 +333,7 @@ export const useEditorStore = create<EditorState>()(
         present: newPresent,
         future: [],
         currentStepIndex: newLog.length - 1,
+        activeSnapshotId: null,
       });
 
       if (result.state.won) {
@@ -343,6 +355,7 @@ export const useEditorStore = create<EditorState>()(
         simulationState: null,
         isRecording: false,
         currentStepIndex: -1,
+        activeSnapshotId: null,
       });
       get().addToast('info', '解法步骤已清除');
     },
@@ -419,7 +432,10 @@ export const useEditorStore = create<EditorState>()(
         simulationState: null,
         isRecording: false,
         currentStepIndex: -1,
+        activeSnapshotId: null,
       });
+      get().addOperationLog('import_level', `导入关卡「${result.level.name}」`);
+      get().persistSnapshots();
       get().addToast('success', `已导入关卡：${result.level.name}`);
       return true;
     },
@@ -456,7 +472,7 @@ export const useEditorStore = create<EditorState>()(
 
     setLevelName: (name: string) => {
       const { present } = get();
-      set({ present: { ...present, name, updatedAt: Date.now() } });
+      set({ present: { ...present, name, updatedAt: Date.now() }, activeSnapshotId: null });
     },
 
     addToast: (type: ToastMessage['type'], message: string) => {
@@ -639,11 +655,13 @@ export const useEditorStore = create<EditorState>()(
           simulationState: null,
           isRecording: false,
           currentStepIndex: -1,
+          activeSnapshotId: null,
           pendingImportLevel: null,
           pendingImportJson: null,
           importConflictOpen: false,
         });
         get().addOperationLog('import_overwrite', `覆盖导入「${pendingImportLevel.name}」`);
+        get().persistSnapshots();
         get().addToast('success', `已覆盖当前关卡：${pendingImportLevel.name}`);
       } else if (resolution === 'save_as_new') {
         const snapName = `导入：${pendingImportLevel.name}`;
@@ -657,11 +675,13 @@ export const useEditorStore = create<EditorState>()(
           simulationState: null,
           isRecording: false,
           currentStepIndex: -1,
+          activeSnapshotId: null,
           pendingImportLevel: null,
           pendingImportJson: null,
           importConflictOpen: false,
         });
         get().addOperationLog('import_as_new', `另存为新快照并导入「${pendingImportLevel.name}」`);
+        get().persistSnapshots();
         get().addToast('success', `已将当前状态保存为快照并导入：${pendingImportLevel.name}`);
       }
     },
@@ -684,6 +704,8 @@ export const useEditorStore = create<EditorState>()(
 
     restoreSnapshotsFromStorage: () => {
       try {
+        let restoredCount = 0;
+        let activeName: string | null = null;
         const raw = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
         if (raw) {
           const parsed: unknown[] = JSON.parse(raw);
@@ -702,11 +724,17 @@ export const useEditorStore = create<EditorState>()(
               return null as unknown as DraftSnapshot;
             }).filter(Boolean);
             set({ snapshots });
+            restoredCount = snapshots.length;
           }
         }
         const activeId = localStorage.getItem(ACTIVE_SNAPSHOT_KEY) || null;
         if (activeId) {
           set({ activeSnapshotId: activeId });
+          const { snapshots } = get();
+          const activeSnap = snapshots.find((s) => s.id === activeId);
+          if (activeSnap) {
+            activeName = activeSnap.name;
+          }
         }
         const logRaw = localStorage.getItem(OPERATION_LOG_KEY);
         if (logRaw) {
@@ -714,6 +742,11 @@ export const useEditorStore = create<EditorState>()(
           if (Array.isArray(log)) {
             set({ operationLog: log });
           }
+        }
+        if (restoredCount > 0) {
+          const activeInfo = activeName ? `，当前版本「${activeName}」` : '';
+          get().addOperationLog('persist_restore', `恢复 ${restoredCount} 个快照${activeInfo}`);
+          get().addToast('info', `已恢复 ${restoredCount} 个快照${activeInfo}`);
         }
       } catch {
         get().addToast('warning', '快照恢复失败');
@@ -990,10 +1023,34 @@ export const useEditorStore = create<EditorState>()(
           get().addToast('warning', warn);
         }
 
-        const importedCount = importResult.logEntries.filter(
-          (e) => e.action !== 'import_package_conflict_skip' && e.action !== 'import_package'
+        const totalIncoming = importResult.logEntries.filter(
+          (e) => e.action !== 'import_package'
         ).length;
-        get().addToast('success', `快照包导入完成：导入 ${importedCount} 个快照`);
+        const replacedCount = importResult.logEntries.filter(
+          (e) => e.action === 'import_package_conflict_replace'
+        ).length;
+        const renamedCount = importResult.logEntries.filter(
+          (e) => e.action === 'import_package_conflict_rename'
+        ).length;
+        const skippedCount = importResult.logEntries.filter(
+          (e) => e.action === 'import_package_conflict_skip'
+        ).length;
+        const importedCount = totalIncoming - skippedCount;
+
+        let detailMsg = `共 ${totalIncoming} 个快照，成功导入 ${importedCount} 个`;
+        if (replacedCount > 0) detailMsg += `，替换 ${replacedCount} 个`;
+        if (renamedCount > 0) detailMsg += `，重命名 ${renamedCount} 个`;
+        if (skippedCount > 0) detailMsg += `，跳过 ${skippedCount} 个`;
+
+        let activeInfo = '';
+        if (finalActiveId) {
+          const activeSnapAfter = finalSnapshots.find((s) => s.id === finalActiveId);
+          if (activeSnapAfter) {
+            activeInfo = `，当前版本「${activeSnapAfter.name}」`;
+          }
+        }
+
+        get().addToast('success', `快照包导入完成：${detailMsg}${activeInfo}`);
         get().persistSnapshots();
 
         return true;
@@ -1048,3 +1105,20 @@ useEditorStore.subscribe(
 );
 
 let persistTimer: ReturnType<typeof setTimeout>;
+
+let snapshotPersistTimer: ReturnType<typeof setTimeout>;
+
+useEditorStore.subscribe(
+  (state) => ({
+    snapshots: state.snapshots,
+    activeSnapshotId: state.activeSnapshotId,
+    operationLog: state.operationLog,
+  }),
+  () => {
+    clearTimeout(snapshotPersistTimer);
+    snapshotPersistTimer = setTimeout(() => {
+      useEditorStore.getState().persistSnapshots();
+    }, 300);
+  },
+  { equalityFn: (a, b) => a.snapshots === b.snapshots && a.activeSnapshotId === b.activeSnapshotId && a.operationLog === b.operationLog }
+);
