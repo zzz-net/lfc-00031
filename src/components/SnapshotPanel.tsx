@@ -1,6 +1,6 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useRef } from 'react';
 import { useEditorStore } from '@/store/useEditorStore';
-import { Camera, RotateCcw, Trash2, Edit3, Check, X, History, ChevronDown, ChevronRight } from 'lucide-react';
+import { Camera, RotateCcw, Trash2, Edit3, Check, X, History, ChevronDown, ChevronRight, Download, Upload } from 'lucide-react';
 import type { DraftSnapshot, OperationLogEntry } from '@/types';
 
 const ACTION_LABELS: Record<OperationLogEntry['action'], string> = {
@@ -10,6 +10,12 @@ const ACTION_LABELS: Record<OperationLogEntry['action'], string> = {
   rollback: '⏪ 回滚',
   import_overwrite: '📥 覆盖导入',
   import_as_new: '📥 另存导入',
+  export_package: '📦 导出快照包',
+  import_package: '📦 导入快照包',
+  import_package_conflict_replace: '🔄 替换同名',
+  import_package_conflict_rename: '✏️ 重命名导入',
+  import_package_conflict_skip: '⏭️ 跳过同名',
+  import_package_failed: '❌ 导入失败',
 };
 
 function SnapshotItem({ snap, isActive }: { snap: DraftSnapshot; isActive: boolean }) {
@@ -144,15 +150,39 @@ export default function SnapshotPanel() {
   const activeSnapshotId = useEditorStore((s) => s.activeSnapshotId);
   const operationLog = useEditorStore((s) => s.operationLog);
   const saveSnapshot = useEditorStore((s) => s.saveSnapshot);
+  const exportSnapshotPackage = useEditorStore((s) => s.exportSnapshotPackage);
+  const requestPackageImport = useEditorStore((s) => s.requestPackageImport);
+  const addToast = useEditorStore((s) => s.addToast);
 
   const [snapName, setSnapName] = useState('');
   const [logExpanded, setLogExpanded] = useState(false);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleSave = useCallback(() => {
     const name = snapName.trim() || `快照 ${snapshots.length + 1}`;
     saveSnapshot(name);
     setSnapName('');
   }, [snapName, snapshots.length, saveSnapshot]);
+
+  const handleImportClick = useCallback(() => {
+    fileInputRef.current?.click();
+  }, []);
+
+  const handleFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const text = await file.text();
+      requestPackageImport(text);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      addToast('error', `读取文件失败：${msg}`);
+    } finally {
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
+    }
+  }, [requestPackageImport, addToast]);
 
   const sorted = [...snapshots].sort((a, b) => b.createdAt - a.createdAt);
   const recentLog = [...operationLog].reverse().slice(0, 20);
@@ -178,7 +208,7 @@ export default function SnapshotPanel() {
         </div>
 
         <div className="px-3 py-2.5 border-b border-white/10">
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 mb-2">
             <input
               className="input-field text-sm flex-1 h-8"
               placeholder="快照名称"
@@ -192,6 +222,31 @@ export default function SnapshotPanel() {
             >
               保存
             </button>
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              className="btn-ghost text-xs px-2 py-1.5 h-7 flex-1 flex items-center justify-center gap-1"
+              onClick={exportSnapshotPackage}
+              title="导出全部快照、当前状态和操作记录为 JSON"
+            >
+              <Download size={14} />
+              <span>导出包</span>
+            </button>
+            <button
+              className="btn-ghost text-xs px-2 py-1.5 h-7 flex-1 flex items-center justify-center gap-1"
+              onClick={handleImportClick}
+              title="从 JSON 文件导入快照包"
+            >
+              <Upload size={14} />
+              <span>导入包</span>
+            </button>
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".json,application/json"
+              className="hidden"
+              onChange={handleFileChange}
+            />
           </div>
         </div>
 

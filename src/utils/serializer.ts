@@ -1,5 +1,5 @@
-import type { LevelData, Position, SwitchDoorRule, LevelRules, MoveStep } from '@/types';
-import { TileType as TT, WinCondition, Direction, DATA_VERSION } from '@/types';
+import type { LevelData, Position, SwitchDoorRule, LevelRules, MoveStep, SnapshotPackage, DraftSnapshot, HistoryState, ValidationResult, OperationLogEntry, SnapshotConflictStrategy, SnapshotPackageImportResult } from '@/types';
+import { TileType as TT, WinCondition, Direction, DATA_VERSION, SNAPSHOT_PACKAGE_VERSION, PACKAGE_TYPE_IDENTIFIER } from '@/types';
 import { createEmptyTiles, findPositions } from './mapOps';
 
 function makeSwitchId(pos: Position): string {
@@ -282,7 +282,7 @@ export function importFromJSON(str: string): { level: LevelData | null; errors: 
   let parsed: unknown;
   try {
     parsed = JSON.parse(str);
-  } catch (e) {
+  } catch {
     return { level: null, errors: ['JSON 解析失败：格式不合法'] };
   }
 
@@ -349,5 +349,311 @@ export function migrateLegacyFormat(obj: Record<string, unknown>): LevelData | n
     moveLogInvalidated: false,
     createdAt: (obj.createdAt as number) || now,
     updatedAt: now,
+  };
+}
+
+export function exportSnapshotPackage(params: {
+  currentLevel: LevelData;
+  currentHistory: HistoryState;
+  lastValidation: ValidationResult | null;
+  snapshots: DraftSnapshot[];
+  activeSnapshotId: string | null;
+  operationLog: OperationLogEntry[];
+}): string {
+  const pkg: SnapshotPackage = {
+    packageVersion: SNAPSHOT_PACKAGE_VERSION,
+    exportedAt: Date.now(),
+    currentLevel: JSON.parse(JSON.stringify(params.currentLevel)),
+    currentHistory: JSON.parse(JSON.stringify(params.currentHistory)),
+    lastValidation: params.lastValidation ? JSON.parse(JSON.stringify(params.lastValidation)) : null,
+    snapshots: JSON.parse(JSON.stringify(params.snapshots)),
+    activeSnapshotId: params.activeSnapshotId,
+    operationLog: JSON.parse(JSON.stringify(params.operationLog)),
+    editorMeta: {
+      levelName: params.currentLevel.name,
+    },
+  };
+  const envelope = {
+    _type: PACKAGE_TYPE_IDENTIFIER,
+    data: pkg,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+function validateSnapshotPackageStructure(obj: unknown): { ok: boolean; errors: string[] } {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { ok: false, errors: ['快照包根元素必须是对象'] };
+  }
+  const envelope = obj as Record<string, unknown>;
+
+  if (envelope._type !== PACKAGE_TYPE_IDENTIFIER) {
+    return { ok: false, errors: ['不是合法的快照包文件（缺少类型标识）'] };
+  }
+
+  const data = envelope.data as Record<string, unknown> | undefined;
+  if (!data || typeof data !== 'object') {
+    return { ok: false, errors: ['快照包缺少 data 字段'] };
+  }
+
+  if (typeof data.packageVersion !== 'string') {
+    errors.push('缺少 packageVersion 或类型错误');
+  }
+  if (typeof data.exportedAt !== 'number') {
+    errors.push('缺少 exportedAt 或类型错误');
+  }
+  if (!data.currentLevel || typeof data.currentLevel !== 'object') {
+    errors.push('缺少 currentLevel 或格式错误');
+  }
+  if (!data.currentHistory || typeof data.currentHistory !== 'object') {
+    errors.push('缺少 currentHistory 或格式错误');
+  }
+  if (!Array.isArray(data.snapshots)) {
+    errors.push('缺少 snapshots 或不是数组');
+  }
+  if (!Array.isArray(data.operationLog)) {
+    errors.push('缺少 operationLog 或不是数组');
+  }
+
+  return { ok: errors.length === 0, errors };
+}
+
+function validateLevelInSnapshot(obj: unknown): string[] {
+  const levelErrors: string[] = [];
+  const result = validateImportStructure(obj);
+  if (!result.ok) {
+    levelErrors.push(...result.errors.map((e) => `关卡数据错误: ${e}`));
+  }
+  return levelErrors;
+}
+
+function validateSnapshot(obj: unknown, index: number): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return [`快照 ${index + 1}: 不是对象`];
+  }
+  const s = obj as Record<string, unknown>;
+  if (typeof s.id !== 'string') errors.push(`快照 ${index + 1}: 缺少 id`);
+  if (typeof s.name !== 'string') errors.push(`快照 ${index + 1}: 缺少 name`);
+  if (typeof s.createdAt !== 'number') errors.push(`快照 ${index + 1}: 缺少 createdAt`);
+  if (!s.level || typeof s.level !== 'object') {
+    errors.push(`快照 ${index + 1}: 缺少 level 数据`);
+  } else {
+    errors.push(...validateLevelInSnapshot(s.level));
+  }
+  if (!Array.isArray(s.past)) errors.push(`快照 ${index + 1}: past 不是数组`);
+  if (!Array.isArray(s.future)) errors.push(`快照 ${index + 1}: future 不是数组`);
+  return errors;
+}
+
+export function parseSnapshotPackage(str: string): { pkg: SnapshotPackage | null; errors: string[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(str);
+  } catch {
+    return { pkg: null, errors: ['JSON 解析失败：格式不合法'] };
+  }
+
+  const structResult = validateSnapshotPackageStructure(parsed);
+  if (!structResult.ok) {
+    return { pkg: null, errors: structResult.errors };
+  }
+
+  const envelope = parsed as { _type: string; data: SnapshotPackage };
+  const pkg = envelope.data;
+  const allErrors: string[] = [];
+
+  const levelErrors = validateLevelInSnapshot(pkg.currentLevel);
+  allErrors.push(...levelErrors);
+
+  if (pkg.currentHistory) {
+    const hist = pkg.currentHistory as unknown as Record<string, unknown>;
+    if (!Array.isArray(hist.past)) allErrors.push('currentHistory.past 不是数组');
+    if (!hist.present || typeof hist.present !== 'object') allErrors.push('currentHistory.present 格式错误');
+    if (!Array.isArray(hist.future)) allErrors.push('currentHistory.future 不是数组');
+  }
+
+  if (Array.isArray(pkg.snapshots)) {
+    for (let i = 0; i < pkg.snapshots.length; i++) {
+      allErrors.push(...validateSnapshot(pkg.snapshots[i], i));
+    }
+  }
+
+  const validWinConditions = new Set(Object.values(WinCondition) as string[]);
+  if (pkg.currentLevel && !validWinConditions.has(pkg.currentLevel.rules.winCondition)) {
+    allErrors.push(`不支持的胜利条件: ${pkg.currentLevel.rules.winCondition}`);
+  }
+  const validDirections = new Set(Object.values(Direction) as string[]);
+  if (pkg.currentLevel && Array.isArray(pkg.currentLevel.moveLog)) {
+    for (let i = 0; i < pkg.currentLevel.moveLog.length; i++) {
+      const step = pkg.currentLevel.moveLog[i] as MoveStep;
+      if (!validDirections.has(step.direction)) {
+        allErrors.push(`currentLevel 步骤 ${i + 1} 包含无效方向: ${step.direction}`);
+      }
+    }
+  }
+
+  if (allErrors.length > 0) {
+    return { pkg: null, errors: allErrors };
+  }
+
+  return { pkg, errors: [] };
+}
+
+function generateUniqueName(baseName: string, existingNames: Set<string>, counter = 1): string {
+  const candidate = counter === 1 ? baseName : `${baseName} (导入 ${counter})`;
+  if (!existingNames.has(candidate)) {
+    return candidate;
+  }
+  return generateUniqueName(baseName, existingNames, counter + 1);
+}
+
+export interface MergeSnapshotOptions {
+  strategy: SnapshotConflictStrategy;
+  existingSnapshots: DraftSnapshot[];
+  incomingSnapshots: DraftSnapshot[];
+  incomingActiveId: string | null;
+}
+
+export interface MergeSnapshotResult {
+  mergedSnapshots: DraftSnapshot[];
+  resolvedActiveId: string | null;
+  logEntries: { action: OperationLogEntry['action']; detail: string; snapshotName?: string }[];
+  nameMap: Map<string, string>;
+}
+
+export function mergeSnapshots(options: MergeSnapshotOptions): MergeSnapshotResult {
+  const { strategy, existingSnapshots, incomingSnapshots, incomingActiveId } = options;
+
+  const merged = [...existingSnapshots];
+  const existingNames = new Set(existingSnapshots.map((s) => s.name));
+  const existingIds = new Set(existingSnapshots.map((s) => s.id));
+  const logEntries: MergeSnapshotResult['logEntries'] = [];
+  const nameMap = new Map<string, string>();
+
+  let resolvedActiveId: string | null = null;
+
+  for (const incoming of incomingSnapshots) {
+    const nameConflict = existingNames.has(incoming.name);
+    let finalName = incoming.name;
+    let finalId = incoming.id;
+
+    if (existingIds.has(incoming.id)) {
+      finalId = `snap_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    let action: OperationLogEntry['action'] | null = null;
+    let detail = '';
+
+    if (nameConflict) {
+      if (strategy === 'skip') {
+        action = 'import_package_conflict_skip';
+        detail = `跳过同名快照「${incoming.name}」`;
+        logEntries.push({ action, detail, snapshotName: incoming.name });
+        continue;
+      } else if (strategy === 'replace') {
+        const idx = merged.findIndex((s) => s.name === incoming.name);
+        if (idx >= 0) {
+          const oldId = merged[idx].id;
+          merged.splice(idx, 1);
+          existingNames.delete(incoming.name);
+          existingIds.delete(oldId);
+        }
+        action = 'import_package_conflict_replace';
+        detail = `替换同名快照「${incoming.name}」`;
+        finalName = incoming.name;
+      } else {
+        finalName = generateUniqueName(incoming.name, existingNames);
+        action = 'import_package_conflict_rename';
+        detail = `重命名「${incoming.name}」→「${finalName}」`;
+      }
+    } else {
+      action = 'import_package';
+      detail = `导入快照「${incoming.name}」`;
+    }
+
+    const newSnap: DraftSnapshot = {
+      ...JSON.parse(JSON.stringify(incoming)),
+      id: finalId,
+      name: finalName,
+    };
+
+    merged.push(newSnap);
+    existingNames.add(finalName);
+    existingIds.add(finalId);
+    nameMap.set(incoming.id, finalId);
+
+    if (action) {
+      logEntries.push({ action, detail, snapshotName: finalName });
+    }
+
+    if (incomingActiveId === incoming.id) {
+      resolvedActiveId = finalId;
+    }
+  }
+
+  return {
+    mergedSnapshots: merged,
+    resolvedActiveId,
+    logEntries,
+    nameMap,
+  };
+}
+
+export function importSnapshotPackageWithMerge(
+  jsonStr: string,
+  existingSnapshots: DraftSnapshot[],
+  strategy: SnapshotConflictStrategy,
+): SnapshotPackageImportResult {
+  const parseResult = parseSnapshotPackage(jsonStr);
+  if (!parseResult.pkg) {
+    return {
+      success: false,
+      errors: parseResult.errors,
+      warnings: [],
+      mergedSnapshots: existingSnapshots,
+      logEntries: [{ action: 'import_package_failed', detail: `快照包解析失败：${parseResult.errors.join('; ')}` }],
+    };
+  }
+
+  const pkg = parseResult.pkg;
+  const warnings: string[] = [];
+  const allLogEntries: MergeSnapshotResult['logEntries'] = [];
+
+  const mergeResult = mergeSnapshots({
+    strategy,
+    existingSnapshots,
+    incomingSnapshots: pkg.snapshots,
+    incomingActiveId: pkg.activeSnapshotId,
+  });
+
+  allLogEntries.push(...mergeResult.logEntries);
+
+  const totalImported = pkg.snapshots.length;
+  const skipped = mergeResult.logEntries.filter((e) => e.action === 'import_package_conflict_skip').length;
+  const replaced = mergeResult.logEntries.filter((e) => e.action === 'import_package_conflict_replace').length;
+  const renamed = mergeResult.logEntries.filter((e) => e.action === 'import_package_conflict_rename').length;
+
+  if (skipped > 0) {
+    warnings.push(`共跳过 ${skipped} 个同名快照`);
+  }
+  if (replaced > 0) {
+    warnings.push(`共替换 ${replaced} 个同名快照`);
+  }
+  if (renamed > 0) {
+    warnings.push(`共重命名 ${renamed} 个同名快照`);
+  }
+
+  allLogEntries.unshift({
+    action: 'import_package',
+    detail: `导入快照包成功：共 ${totalImported} 个快照，导入 ${totalImported - skipped} 个`,
+  });
+
+  return {
+    success: true,
+    errors: [],
+    warnings,
+    mergedSnapshots: mergeResult.mergedSnapshots,
+    logEntries: allLogEntries,
   };
 }

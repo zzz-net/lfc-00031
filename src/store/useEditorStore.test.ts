@@ -1,7 +1,8 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useEditorStore } from '@/store/useEditorStore';
-import { createSampleLevels, exportToJSON } from '@/utils/serializer';
-import { Direction, WinCondition, TileType, STORAGE_KEY, HistoryEntry, SNAPSHOT_STORAGE_KEY, OPERATION_LOG_KEY, ACTIVE_SNAPSHOT_KEY } from '@/types';
+import { createSampleLevels, exportToJSON, exportSnapshotPackage, parseSnapshotPackage, importSnapshotPackageWithMerge } from '@/utils/serializer';
+import { Direction, WinCondition, TileType, STORAGE_KEY, HistoryEntry, SNAPSHOT_STORAGE_KEY, OPERATION_LOG_KEY, ACTIVE_SNAPSHOT_KEY, DraftSnapshot, ValidationResult, HistoryState } from '@/types';
 
 const mockLocalStorage: Record<string, string> = {};
 vi.stubGlobal('localStorage', {
@@ -745,5 +746,615 @@ describe('删除确认', () => {
 
     s().deleteSnapshot(snap.id);
     expect(s().deleteConfirmSnapshotId).toBeNull();
+  });
+});
+
+const mockBlobUrls: string[] = [];
+const mockCreateObjectURL = vi.fn((blob: Blob) => {
+  const url = `blob:mock-${mockBlobUrls.length}`;
+  mockBlobUrls.push(url);
+  return url;
+});
+const mockRevokeObjectURL = vi.fn((url: string) => {
+  const idx = mockBlobUrls.indexOf(url);
+  if (idx >= 0) mockBlobUrls.splice(idx, 1);
+});
+vi.stubGlobal('URL', {
+  createObjectURL: mockCreateObjectURL,
+  revokeObjectURL: mockRevokeObjectURL,
+});
+const mockAppendChild = vi.fn();
+const mockRemoveChild = vi.fn();
+const mockClick = vi.fn();
+vi.stubGlobal('document', {
+  createElement: vi.fn(() => ({
+    href: '',
+    download: '',
+    click: mockClick,
+    appendChild: mockAppendChild,
+    removeChild: mockRemoveChild,
+  })),
+  body: {
+    appendChild: mockAppendChild,
+    removeChild: mockRemoveChild,
+  },
+});
+
+describe('快照包：导出功能', () => {
+  it('exportSnapshotPackage 序列化函数应生成合法 JSON 并包含完整数据', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+
+    s().validate();
+    const snap1 = s().saveSnapshot('v1');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const snap2 = s().saveSnapshot('v2');
+
+    expect(s().snapshots.length).toBe(2);
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+
+    const jsonStr = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    expect(jsonStr).toBeTypeOf('string');
+    expect(jsonStr.length).toBeGreaterThan(100);
+
+    const parsed = JSON.parse(jsonStr);
+    expect(parsed._type).toBe('puzzle-editor-snapshot-package');
+    expect(parsed.data).not.toBeNull();
+    expect(parsed.data.packageVersion).toBe('1.0.0');
+    expect(parsed.data.snapshots.length).toBe(2);
+    expect(parsed.data.snapshots[0].name).toBe('v1');
+    expect(parsed.data.snapshots[1].name).toBe('v2');
+    expect(parsed.data.currentLevel).not.toBeNull();
+    expect(parsed.data.currentHistory).not.toBeNull();
+    expect(parsed.data.currentHistory.present).not.toBeNull();
+    expect(Array.isArray(parsed.data.operationLog)).toBe(true);
+
+    const parseResult = parseSnapshotPackage(jsonStr);
+    expect(parseResult.pkg).not.toBeNull();
+    expect(parseResult.errors).toEqual([]);
+    expect(parseResult.pkg!.snapshots.length).toBe(2);
+    expect(parseResult.pkg!.activeSnapshotId).toBe(snap2.id);
+  });
+
+  it('store.exportSnapshotPackage 应触发导出操作记录', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+    s().saveSnapshot('v1');
+
+    const beforeLogCount = s().operationLog.length;
+    s().exportSnapshotPackage();
+
+    expect(s().operationLog.length).toBe(beforeLogCount + 1);
+    expect(s().operationLog[s().operationLog.length - 1].action).toBe('export_package');
+  });
+});
+
+describe('快照包：同名冲突处理', () => {
+  function buildPackageWithSnapshots(snapNames: string[], baseLevel: any): string {
+    const snapshots = snapNames.map((name, idx) => ({
+      id: `snap_pkg_${idx}`,
+      name,
+      createdAt: Date.now() + idx * 1000,
+      level: JSON.parse(JSON.stringify(baseLevel)),
+      moveLog: [],
+      moveLogInvalidated: false,
+      past: [],
+      future: [],
+      lastValidation: null,
+    }));
+    const pkg = {
+      _type: 'puzzle-editor-snapshot-package',
+      data: {
+        packageVersion: '1.0.0',
+        exportedAt: Date.now(),
+        currentLevel: JSON.parse(JSON.stringify(baseLevel)),
+        currentHistory: {
+          past: [],
+          present: JSON.parse(JSON.stringify(baseLevel)),
+          future: [],
+          lastValidation: null,
+        },
+        lastValidation: null,
+        snapshots,
+        activeSnapshotId: snapshots[0]?.id || null,
+        operationLog: [],
+        editorMeta: { levelName: baseLevel.name },
+      },
+    };
+    return JSON.stringify(pkg);
+  }
+
+  it('策略 rename：导入同名快照时自动改名，不覆盖现有', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    s().saveSnapshot('alpha');
+    s().saveSnapshot('beta');
+    const existingSnapBefore = JSON.stringify(s().snapshots.map(s => s.name));
+    expect(s().snapshots.length).toBe(2);
+
+    const pkgJson = buildPackageWithSnapshots(['alpha', 'gamma'], level);
+    s().requestPackageImport(pkgJson);
+    expect(s().packageImportConflictOpen).toBe(true);
+    expect(s().detectedConflictingSnapshotNames).toEqual(['alpha']);
+
+    const result = s().resolvePackageImport('rename');
+    expect(result).toBe(true);
+    expect(s().snapshots.length).toBe(4);
+
+    const names = s().snapshots.map(s => s.name).sort();
+    expect(names).toContain('alpha');
+    expect(names).toContain('beta');
+    expect(names).toContain('gamma');
+    expect(names.some(n => n.startsWith('alpha (导入 '))).toBe(true);
+
+    const renameLogs = s().operationLog.filter(e => e.action === 'import_package_conflict_rename');
+    expect(renameLogs.length).toBe(1);
+    expect(renameLogs[0].detail).toMatch(/重命名.*alpha/);
+
+    const importLogs = s().operationLog.filter(e => e.action === 'import_package');
+    expect(importLogs.length).toBeGreaterThanOrEqual(1);
+
+    const originalAlpha = s().snapshots.find(s => s.name === 'alpha');
+    expect(originalAlpha).not.toBeUndefined();
+  });
+
+  it('策略 replace：导入同名快照时替换现有', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    const modifiedLevel = JSON.parse(JSON.stringify(level));
+    modifiedLevel.tiles[0][0] = TileType.FLOOR;
+
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    const originalSnap = s().saveSnapshot('alpha');
+    const originalSnapId = originalSnap.id;
+    expect(s().snapshots[0].level.tiles[0][0]).toBe(level.tiles[0][0]);
+
+    const pkgJson = buildPackageWithSnapshots(['alpha'], modifiedLevel);
+    s().requestPackageImport(pkgJson);
+    expect(s().packageImportConflictOpen).toBe(true);
+
+    const result = s().resolvePackageImport('replace');
+    expect(result).toBe(true);
+    expect(s().snapshots.length).toBe(1);
+
+    const replaced = s().snapshots.find(s => s.name === 'alpha');
+    expect(replaced).not.toBeUndefined();
+    expect(replaced!.level.tiles[0][0]).toBe(TileType.FLOOR);
+    expect(replaced!.id).not.toBe(originalSnapId);
+
+    const replaceLogs = s().operationLog.filter(e => e.action === 'import_package_conflict_replace');
+    expect(replaceLogs.length).toBe(1);
+  });
+
+  it('策略 skip：导入同名快照时跳过，保留现有不变', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    const modifiedLevel = JSON.parse(JSON.stringify(level));
+    modifiedLevel.tiles[0][0] = TileType.FLOOR;
+
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    const originalSnap = s().saveSnapshot('alpha');
+    s().saveSnapshot('beta');
+    expect(s().snapshots.length).toBe(2);
+
+    const pkgJson = buildPackageWithSnapshots(['alpha', 'gamma'], modifiedLevel);
+    s().requestPackageImport(pkgJson);
+
+    const result = s().resolvePackageImport('skip');
+    expect(result).toBe(true);
+    expect(s().snapshots.length).toBe(3);
+
+    const alphaSnap = s().snapshots.find(s => s.name === 'alpha');
+    expect(alphaSnap).not.toBeUndefined();
+    expect(alphaSnap!.id).toBe(originalSnap.id);
+    expect(alphaSnap!.level.tiles[0][0]).toBe(level.tiles[0][0]);
+
+    const names = s().snapshots.map(s => s.name);
+    expect(names).toContain('beta');
+    expect(names).toContain('gamma');
+
+    const skipLogs = s().operationLog.filter(e => e.action === 'import_package_conflict_skip');
+    expect(skipLogs.length).toBe(1);
+  });
+
+  it('cancelPackageImport 不改变任何现有状态', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    s().saveSnapshot('alpha');
+    const stateBefore = {
+      snapshotCount: s().snapshots.length,
+      snapshotNames: s().snapshots.map(s => s.name),
+      presentTiles: JSON.stringify(s().present.tiles),
+      opLogCount: s().operationLog.length,
+    };
+
+    const pkgJson = buildPackageWithSnapshots(['alpha'], level);
+    s().requestPackageImport(pkgJson);
+    expect(s().packageImportConflictOpen).toBe(true);
+
+    s().cancelPackageImport();
+
+    expect(s().snapshots.length).toBe(stateBefore.snapshotCount);
+    expect(s().snapshots.map(s => s.name)).toEqual(stateBefore.snapshotNames);
+    expect(JSON.stringify(s().present.tiles)).toBe(stateBefore.presentTiles);
+    expect(s().packageImportConflictOpen).toBe(false);
+    expect(s().pendingPackageImport).toBeNull();
+  });
+});
+
+describe('快照包：导出再导入一致性（跨重启恢复模拟）', () => {
+  it('导出后再导入，快照数据与导出前严格一致（除 ID 可能变化）', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().validate();
+    const val1 = JSON.parse(JSON.stringify(s().lastValidation));
+    s().saveSnapshot('baseline');
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().validate();
+    const val2 = JSON.parse(JSON.stringify(s().lastValidation));
+    s().saveSnapshot('modified');
+
+    const activeSnapId = s().snapshots[1].id;
+    s().setActiveSnapshotId(activeSnapId);
+
+    const snapshotsBefore = JSON.parse(JSON.stringify(s().snapshots));
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    expect(s().snapshots.length).toBe(0);
+    expect(s().past.length).toBe(0);
+
+    s().saveSnapshot('baseline');
+    expect(s().snapshots.length).toBe(1);
+
+    s().requestPackageImport(pkgJson);
+    expect(s().packageImportConflictOpen).toBe(true);
+    const importResult = s().resolvePackageImport('rename');
+    expect(importResult).toBe(true);
+
+    expect(s().snapshots.length).toBe(3);
+    const names = s().snapshots.map(s => s.name);
+    expect(names).toContain('baseline');
+    expect(names.some(n => n.startsWith('baseline (导入 '))).toBe(true);
+    expect(names).toContain('modified');
+
+    for (let i = 0; i < snapshotsBefore.length; i++) {
+      const beforeSnap = snapshotsBefore[i];
+      let afterSnap: any;
+      if (beforeSnap.name === 'baseline') {
+        afterSnap = s().snapshots.find((ss) => ss.name.startsWith('baseline (导入 '));
+      } else {
+        afterSnap = s().snapshots.find((ss) => ss.name === beforeSnap.name);
+      }
+      expect(afterSnap).not.toBeUndefined();
+
+      const beforeLevel = JSON.parse(JSON.stringify(beforeSnap.level));
+      const afterLevel = JSON.parse(JSON.stringify(afterSnap!.level));
+      delete beforeLevel.updatedAt;
+      delete afterLevel.updatedAt;
+      expect(JSON.stringify(afterLevel)).toBe(JSON.stringify(beforeLevel));
+
+      expect(afterSnap!.moveLog.length).toBe(beforeSnap.moveLog.length);
+      expect(afterSnap!.past.length).toBe(beforeSnap.past.length);
+      expect(afterSnap!.future.length).toBe(beforeSnap.future.length);
+    }
+
+    expect(s().activeSnapshotId).not.toBeNull();
+    const storeActiveId = s().activeSnapshotId;
+    const activeSnap = s().snapshots.find((ss) => ss.id === storeActiveId);
+    expect(activeSnap).not.toBeUndefined();
+    expect(activeSnap!.name).toBe('modified');
+
+    const afterTiles = JSON.parse(JSON.stringify(s().present.tiles));
+    const beforeTiles = JSON.parse(JSON.stringify(snapshotsBefore[1].level.tiles));
+    expect(JSON.stringify(afterTiles)).toBe(JSON.stringify(beforeTiles));
+  });
+
+  it('导入后 moveLog、lastValidation、undo/redo 与选中版本对齐', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null, activeSnapshotId: null,
+    });
+
+    s().validate();
+    s().saveSnapshot('validated');
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().setTileAt(1, 0, TileType.FLOOR);
+    expect(s().past.length).toBe(2);
+    s().undo();
+    expect(s().past.length).toBe(1);
+    expect(s().future.length).toBe(1);
+    s().saveSnapshot('with-history');
+    const expectedPastLen = s().past.length;
+    const expectedFutureLen = s().future.length;
+
+    const currentHistory: HistoryState = {
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: s().lastValidation ? JSON.parse(JSON.stringify(s().lastValidation)) : null,
+    };
+    const pkgJson = exportSnapshotPackage({
+      currentLevel: s().present,
+      currentHistory,
+      lastValidation: s().lastValidation,
+      snapshots: s().snapshots,
+      activeSnapshotId: s().activeSnapshotId,
+      operationLog: s().operationLog,
+    });
+
+    useEditorStore.setState(useEditorStore.getInitialState());
+    s().requestPackageImport(pkgJson);
+    s().resolvePackageImport('rename');
+
+    expect(s().activeSnapshotId).not.toBeNull();
+    const activeSnap = s().snapshots.find((ss) => ss.id === s().activeSnapshotId);
+    expect(activeSnap).not.toBeUndefined();
+    expect(activeSnap!.name).toBe('with-history');
+    expect(s().lastValidation).toBeNull();
+    expect(s().canUndo()).toBe(true);
+    expect(s().canRedo()).toBe(true);
+    expect(s().simulationState).toBeNull();
+    expect(s().isRecording).toBe(false);
+    expect(s().currentStepIndex).toBe(-1);
+    expect(s().past.length).toBe(expectedPastLen);
+    expect(s().future.length).toBe(expectedFutureLen);
+
+    const withHistorySnap = s().snapshots.find(ss => ss.name === 'with-history');
+    expect(withHistorySnap).not.toBeUndefined();
+    expect(s().past.length).toBe(withHistorySnap!.past.length);
+    expect(s().future.length).toBe(withHistorySnap!.future.length);
+
+    const validatedSnap = s().snapshots.find(ss => ss.name === 'validated');
+    expect(validatedSnap).not.toBeUndefined();
+    expect(validatedSnap!.lastValidation).not.toBeNull();
+    expect(validatedSnap!.lastValidation?.valid).toBe(true);
+  });
+});
+
+describe('快照包：非法包回退', () => {
+  it('非 JSON 格式导入失败，不污染现有状态', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    s().saveSnapshot('existing');
+    const stateBefore = {
+      snapshotCount: s().snapshots.length,
+      pastLen: s().past.length,
+      presentJson: JSON.stringify(s().present),
+      opLogLen: s().operationLog.length,
+    };
+
+    s().requestPackageImport('this is not valid json at all');
+
+    expect(s().snapshots.length).toBe(stateBefore.snapshotCount);
+    expect(s().past.length).toBe(stateBefore.pastLen);
+    expect(JSON.stringify(s().present)).toBe(stateBefore.presentJson);
+    expect(s().packageImportConflictOpen).toBe(false);
+
+    const failLogs = s().operationLog.filter(e => e.action === 'import_package_failed');
+    expect(failLogs.length).toBe(1);
+  });
+
+  it('缺少必填字段的包导入失败，现有状态保持不变', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    s().saveSnapshot('existing');
+    const stateBefore = {
+      snapshotCount: s().snapshots.length,
+      snapshotNames: s().snapshots.map(s => s.name),
+      opLogLen: s().operationLog.length,
+    };
+
+    const badPkg = JSON.stringify({
+      _type: 'puzzle-editor-snapshot-package',
+      data: {
+        packageVersion: '1.0.0',
+      },
+    });
+
+    s().requestPackageImport(badPkg);
+
+    expect(s().snapshots.length).toBe(stateBefore.snapshotCount);
+    expect(s().snapshots.map(s => s.name)).toEqual(stateBefore.snapshotNames);
+
+    const failLogs = s().operationLog.filter(e => e.action === 'import_package_failed');
+    expect(failLogs.length).toBe(1);
+    expect(failLogs[0].detail).toMatch(/缺少|错误/);
+  });
+
+  it('类型标识错误的包被正确拒绝', () => {
+    const wrongTypePkg = JSON.stringify({
+      _type: 'wrong-type-identifier',
+      data: { anything: 'here' },
+    });
+    const samples = createSampleLevels();
+    useEditorStore.setState({ present: samples[0], snapshots: [], operationLog: [] });
+    s().saveSnapshot('existing');
+    const countBefore = s().snapshots.length;
+
+    s().requestPackageImport(wrongTypePkg);
+
+    expect(s().snapshots.length).toBe(countBefore);
+    expect(s().operationLog.filter(e => e.action === 'import_package_failed').length).toBe(1);
+  });
+
+  it('解析成功但导入过程异常时，完整回滚到导入前状态', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    s().saveSnapshot('existing-1');
+    s().saveSnapshot('existing-2');
+    const stateBefore = {
+      snapshots: JSON.parse(JSON.stringify(s().snapshots)),
+      past: JSON.parse(JSON.stringify(s().past)),
+      present: JSON.parse(JSON.stringify(s().present)),
+      future: JSON.parse(JSON.stringify(s().future)),
+      lastValidation: JSON.parse(JSON.stringify(s().lastValidation)),
+      activeSnapshotId: s().activeSnapshotId,
+      opLogLen: s().operationLog.length,
+    };
+
+    const goodPkg = JSON.stringify({
+      _type: 'puzzle-editor-snapshot-package',
+      data: {
+        packageVersion: '1.0.0',
+        exportedAt: Date.now(),
+        currentLevel: JSON.parse(JSON.stringify(level)),
+        currentHistory: {
+          past: [],
+          present: JSON.parse(JSON.stringify(level)),
+          future: [],
+          lastValidation: null,
+        },
+        lastValidation: null,
+        snapshots: [{
+          id: 'snap_test_1',
+          name: 'new-snap',
+          createdAt: Date.now(),
+          level: JSON.parse(JSON.stringify(level)),
+          moveLog: [],
+          moveLogInvalidated: false,
+          past: 'this-should-cause-error' as any,
+          future: [],
+          lastValidation: null,
+        }],
+        activeSnapshotId: 'snap_test_1',
+        operationLog: [],
+        editorMeta: { levelName: level.name },
+      },
+    });
+
+    s().requestPackageImport(goodPkg);
+
+    expect(s().snapshots.length).toBe(stateBefore.snapshots.length);
+    for (let i = 0; i < stateBefore.snapshots.length; i++) {
+      expect(s().snapshots[i].name).toBe(stateBefore.snapshots[i].name);
+      expect(s().snapshots[i].id).toBe(stateBefore.snapshots[i].id);
+    }
+    expect(JSON.stringify(s().past)).toBe(JSON.stringify(stateBefore.past));
+    expect(JSON.stringify(s().present)).toBe(JSON.stringify(stateBefore.present));
+    expect(s().pendingPackageImport).toBeNull();
+    expect(s().packageImportConflictOpen).toBe(false);
+
+    const failLogs = s().operationLog.filter(e => e.action === 'import_package_failed');
+    expect(failLogs.length).toBeGreaterThanOrEqual(1);
+  });
+});
+
+describe('快照包：无冲突直接导入', () => {
+  it('无同名快照时，不弹出冲突对话框直接完成导入', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({
+      present: level, past: [], future: [], snapshots: [],
+      operationLog: [], lastValidation: null,
+    });
+
+    s().saveSnapshot('local-only');
+
+    const pkg = JSON.stringify({
+      _type: 'puzzle-editor-snapshot-package',
+      data: {
+        packageVersion: '1.0.0',
+        exportedAt: Date.now(),
+        currentLevel: JSON.parse(JSON.stringify(level)),
+        currentHistory: {
+          past: [], present: JSON.parse(JSON.stringify(level)), future: [], lastValidation: null,
+        },
+        lastValidation: null,
+        snapshots: [{
+          id: 'snap_remote_1',
+          name: 'remote-snap',
+          createdAt: Date.now(),
+          level: JSON.parse(JSON.stringify(level)),
+          moveLog: [],
+          moveLogInvalidated: false,
+          past: [],
+          future: [],
+          lastValidation: null,
+        }],
+        activeSnapshotId: null,
+        operationLog: [],
+        editorMeta: { levelName: level.name },
+      },
+    });
+
+    s().requestPackageImport(pkg);
+
+    expect(s().packageImportConflictOpen).toBe(false);
+    expect(s().snapshots.length).toBe(2);
+    expect(s().snapshots.map(s => s.name)).toContain('local-only');
+    expect(s().snapshots.map(s => s.name)).toContain('remote-snap');
   });
 });

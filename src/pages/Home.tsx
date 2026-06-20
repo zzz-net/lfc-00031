@@ -8,6 +8,7 @@ import ControlBar from '@/components/ControlBar';
 import Toast from '@/components/Toast';
 import SnapshotPanel from '@/components/SnapshotPanel';
 import ImportConflictDialog from '@/components/ImportConflictDialog';
+import PackageImportConflictDialog from '@/components/PackageImportConflictDialog';
 
 export default function Home() {
   const restoreFromStorage = useEditorStore((s) => s.restoreFromStorage);
@@ -46,6 +47,7 @@ export default function Home() {
       <div className="relative z-20"><ControlBar /></div>
       <RulesPanel />
       <ImportConflictDialog />
+      <PackageImportConflictDialog />
       <Toast />
     </div>
   );

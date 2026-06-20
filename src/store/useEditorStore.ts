@@ -1,11 +1,11 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import type { LevelData, ToolId, SimulationState, ValidationResult, ToastMessage, Direction, LevelRules, SwitchDoorRule, WinCondition, HistoryEntry, DraftSnapshot, OperationLogEntry, ImportConflictResolution } from '@/types';
-import { TileType, DATA_VERSION, STORAGE_KEY, TILE_TO_TOOL, SNAPSHOT_STORAGE_KEY, OPERATION_LOG_KEY, ACTIVE_SNAPSHOT_KEY } from '@/types';
-import { setTile, rebuildDerivedFromTiles, resizeLevel, cloneTiles, createEmptyTiles } from '@/utils/mapOps';
+import type { LevelData, ToolId, SimulationState, ValidationResult, ToastMessage, Direction, LevelRules, SwitchDoorRule, HistoryEntry, DraftSnapshot, OperationLogEntry, ImportConflictResolution, SnapshotConflictStrategy, SnapshotPackage, HistoryState, SnapshotPackageImportResult } from '@/types';
+import { TileType, STORAGE_KEY, SNAPSHOT_STORAGE_KEY, OPERATION_LOG_KEY, ACTIVE_SNAPSHOT_KEY } from '@/types';
+import { setTile, rebuildDerivedFromTiles, resizeLevel } from '@/utils/mapOps';
 import { simulateMove, initialSimulationState, applyMoveLog } from '@/utils/simulation';
 import { validateLevel } from '@/utils/validator';
-import { createDefaultLevel, createSampleLevels, exportToJSON, importFromJSON } from '@/utils/serializer';
+import { createDefaultLevel, createSampleLevels, exportToJSON, importFromJSON, exportSnapshotPackage, parseSnapshotPackage, importSnapshotPackageWithMerge, mergeSnapshots } from '@/utils/serializer';
 
 interface EditorState {
   past: HistoryEntry[];
@@ -74,6 +74,16 @@ interface EditorState {
   persistSnapshots: () => void;
   restoreSnapshotsFromStorage: () => void;
   addOperationLog: (action: OperationLogEntry['action'], detail?: string, snapshotId?: string, snapshotName?: string) => void;
+
+  exportSnapshotPackage: () => void;
+  pendingPackageImport: SnapshotPackage | null;
+  pendingPackageJson: string | null;
+  packageImportConflictOpen: boolean;
+  detectedConflictingSnapshotNames: string[];
+  requestPackageImport: (jsonStr: string) => void;
+  resolvePackageImport: (strategy: SnapshotConflictStrategy, overrideJson?: string, overridePkg?: SnapshotPackage) => boolean;
+  cancelPackageImport: () => void;
+  setPackageImportConflictOpen: (open: boolean) => void;
 }
 
 let toastCounter = 0;
@@ -117,6 +127,11 @@ export const useEditorStore = create<EditorState>()(
     importConflictOpen: false,
     snapshotPanelOpen: false,
     deleteConfirmSnapshotId: null,
+
+    pendingPackageImport: null,
+    pendingPackageJson: null,
+    packageImportConflictOpen: false,
+    detectedConflictingSnapshotNames: [],
 
     newLevel: (width = 8, height = 8) => {
       const level = createDefaultLevel(width, height);
@@ -673,14 +688,15 @@ export const useEditorStore = create<EditorState>()(
         if (raw) {
           const parsed: unknown[] = JSON.parse(raw);
           if (Array.isArray(parsed)) {
-            const snapshots: DraftSnapshot[] = parsed.map((rawSnap: any) => {
+            const snapshots: DraftSnapshot[] = parsed.map((rawSnap) => {
               if (rawSnap && typeof rawSnap === 'object' && 'id' in rawSnap) {
+                const snapObj = rawSnap as Record<string, unknown>;
                 const hasNewFormat =
-                  Array.isArray(rawSnap.past) && Array.isArray(rawSnap.future);
+                  Array.isArray(snapObj.past) && Array.isArray(snapObj.future);
                 return {
-                  ...rawSnap,
-                  past: hasNewFormat ? rawSnap.past : [],
-                  future: hasNewFormat ? rawSnap.future : [],
+                  ...snapObj,
+                  past: hasNewFormat ? snapObj.past : [],
+                  future: hasNewFormat ? snapObj.future : [],
                 } as DraftSnapshot;
               }
               return null as unknown as DraftSnapshot;
@@ -714,6 +730,225 @@ export const useEditorStore = create<EditorState>()(
         detail,
       };
       set((s) => ({ operationLog: [...s.operationLog, entry] }));
+    },
+
+    exportSnapshotPackage: () => {
+      const { present, past, future, lastValidation, snapshots, activeSnapshotId, operationLog } = get();
+      const currentHistory: HistoryState = { past, present, future, lastValidation };
+      const json = exportSnapshotPackage({
+        currentLevel: present,
+        currentHistory,
+        lastValidation,
+        snapshots,
+        activeSnapshotId,
+        operationLog,
+      });
+      const blob = new Blob([json], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const timestamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `snapshot-package-${present.name || 'level'}-${timestamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      get().addOperationLog('export_package', `导出快照包：${snapshots.length} 个快照`);
+      get().addToast('success', `快照包已导出（${snapshots.length} 个快照）`);
+    },
+
+    requestPackageImport: (jsonStr: string) => {
+      const parseResult = parseSnapshotPackage(jsonStr);
+      if (!parseResult.pkg) {
+        for (const err of parseResult.errors) {
+          get().addToast('error', `导入失败：${err}`);
+        }
+        get().addOperationLog('import_package_failed', parseResult.errors.join('; '));
+        return;
+      }
+      const pkg = parseResult.pkg;
+      const { snapshots } = get();
+      const existingNames = new Set(snapshots.map((s) => s.name));
+      const conflicts: string[] = [];
+      for (const s of pkg.snapshots) {
+        if (existingNames.has(s.name)) {
+          conflicts.push(s.name);
+        }
+      }
+      if (conflicts.length === 0) {
+        get().resolvePackageImport('rename', jsonStr, pkg);
+        return;
+      }
+      set({
+        pendingPackageImport: pkg,
+        pendingPackageJson: jsonStr,
+        packageImportConflictOpen: true,
+        detectedConflictingSnapshotNames: conflicts,
+      });
+    },
+
+    resolvePackageImport: (strategy: SnapshotConflictStrategy, overrideJson?: string, overridePkg?: SnapshotPackage): boolean => {
+      const stateNow = get();
+      const pendingPackageImport = overridePkg ?? stateNow.pendingPackageImport;
+      const pendingPackageJson = overrideJson ?? stateNow.pendingPackageJson;
+      const { snapshots, past, present, future, lastValidation, activeSnapshotId, operationLog } = stateNow;
+
+      if (!pendingPackageJson) {
+        set({ packageImportConflictOpen: false, pendingPackageImport: null, pendingPackageJson: null, detectedConflictingSnapshotNames: [] });
+        return false;
+      }
+
+      const stateBefore = {
+        snapshots: JSON.parse(JSON.stringify(snapshots)) as DraftSnapshot[],
+        past: JSON.parse(JSON.stringify(past)) as HistoryEntry[],
+        present: JSON.parse(JSON.stringify(present)) as LevelData,
+        future: JSON.parse(JSON.stringify(future)) as HistoryEntry[],
+        lastValidation: lastValidation ? JSON.parse(JSON.stringify(lastValidation)) : null,
+        activeSnapshotId,
+        operationLog: JSON.parse(JSON.stringify(operationLog)) as OperationLogEntry[],
+      };
+
+      let importResult: SnapshotPackageImportResult;
+      try {
+        importResult = importSnapshotPackageWithMerge(pendingPackageJson, stateBefore.snapshots, strategy);
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        get().addToast('error', `导入异常：${errMsg}`);
+        get().addOperationLog('import_package_failed', `导入过程异常：${errMsg}`);
+        set({ packageImportConflictOpen: false, pendingPackageImport: null, pendingPackageJson: null, detectedConflictingSnapshotNames: [] });
+        return false;
+      }
+
+      if (!importResult.success) {
+        for (const err of importResult.errors) {
+          get().addToast('error', `导入失败：${err}`);
+        }
+        for (const log of importResult.logEntries) {
+          get().addOperationLog(log.action, log.detail, undefined, log.snapshotName);
+        }
+        set({ packageImportConflictOpen: false, pendingPackageImport: null, pendingPackageJson: null, detectedConflictingSnapshotNames: [] });
+        return false;
+      }
+
+      try {
+        const pkg = pendingPackageImport;
+        if (!pkg) {
+          throw new Error('待导入的快照包丢失');
+        }
+        const mergeResult = mergeSnapshots({
+          strategy,
+          existingSnapshots: stateBefore.snapshots,
+          incomingSnapshots: pkg.snapshots,
+          incomingActiveId: pkg.activeSnapshotId,
+        });
+
+        const resolvedActiveId = mergeResult.resolvedActiveId ?? pkg.activeSnapshotId;
+        const finalSnapshots = importResult.mergedSnapshots;
+
+        const newHistory: HistoryState = pkg.currentHistory;
+        const newPast: HistoryEntry[] = Array.isArray((newHistory.past?.[0] as unknown as HistoryEntry)?.level)
+          ? newHistory.past
+          : (newHistory.past as unknown as LevelData[]).map((l) => ({ level: l, validation: null }));
+        const newFuture: HistoryEntry[] = Array.isArray((newHistory.future?.[0] as unknown as HistoryEntry)?.level)
+          ? newHistory.future
+          : (newHistory.future as unknown as LevelData[] || []).map((l) => ({ level: l, validation: null }));
+        const newPresent: LevelData = {
+          ...JSON.parse(JSON.stringify(newHistory.present)),
+          updatedAt: Date.now(),
+        };
+        const newLastValidation = newHistory.lastValidation ? JSON.parse(JSON.stringify(newHistory.lastValidation)) : null;
+
+        let finalPresent: LevelData;
+        let finalPast: HistoryEntry[];
+        let finalFuture: HistoryEntry[];
+        let finalLastValidation: ValidationResult | null;
+        let finalActiveId: string | null;
+
+        if (resolvedActiveId && finalSnapshots.some((s) => s.id === resolvedActiveId)) {
+          const activeSnap = finalSnapshots.find((s) => s.id === resolvedActiveId)!;
+          finalPresent = {
+            ...JSON.parse(JSON.stringify(activeSnap.level)),
+            moveLog: [...activeSnap.moveLog],
+            moveLogInvalidated: activeSnap.moveLogInvalidated,
+            updatedAt: Date.now(),
+          };
+          finalPast = JSON.parse(JSON.stringify(activeSnap.past));
+          finalFuture = JSON.parse(JSON.stringify(activeSnap.future));
+          finalLastValidation = activeSnap.lastValidation ? JSON.parse(JSON.stringify(activeSnap.lastValidation)) : null;
+          finalActiveId = resolvedActiveId;
+        } else {
+          finalPresent = newPresent;
+          finalPast = newPast;
+          finalFuture = newFuture;
+          finalLastValidation = newLastValidation;
+          finalActiveId = null;
+        }
+
+        set({
+          snapshots: finalSnapshots,
+          past: finalPast,
+          present: finalPresent,
+          future: finalFuture,
+          lastValidation: finalLastValidation,
+          activeSnapshotId: finalActiveId,
+          simulationState: null,
+          isRecording: false,
+          currentStepIndex: -1,
+          packageImportConflictOpen: false,
+          pendingPackageImport: null,
+          pendingPackageJson: null,
+          detectedConflictingSnapshotNames: [],
+        });
+
+        for (const log of importResult.logEntries) {
+          get().addOperationLog(log.action, log.detail, undefined, log.snapshotName);
+        }
+
+        for (const warn of importResult.warnings) {
+          get().addToast('warning', warn);
+        }
+
+        const importedCount = importResult.logEntries.filter(
+          (e) => e.action !== 'import_package_conflict_skip' && e.action !== 'import_package'
+        ).length;
+        get().addToast('success', `快照包导入完成：导入 ${importedCount} 个快照`);
+        get().persistSnapshots();
+
+        return true;
+      } catch (e) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+
+        set({
+          snapshots: stateBefore.snapshots,
+          past: stateBefore.past,
+          present: stateBefore.present,
+          future: stateBefore.future,
+          lastValidation: stateBefore.lastValidation,
+          activeSnapshotId: stateBefore.activeSnapshotId,
+          packageImportConflictOpen: false,
+          pendingPackageImport: null,
+          pendingPackageJson: null,
+          detectedConflictingSnapshotNames: [],
+        });
+
+        get().addToast('error', `导入失败，已回滚：${errMsg}`);
+        get().addOperationLog('import_package_failed', `导入过程异常，已回滚：${errMsg}`);
+        return false;
+      }
+    },
+
+    cancelPackageImport: () => {
+      set({
+        packageImportConflictOpen: false,
+        pendingPackageImport: null,
+        pendingPackageJson: null,
+        detectedConflictingSnapshotNames: [],
+      });
+      get().addToast('info', '快照包导入已取消');
+    },
+
+    setPackageImportConflictOpen: (open: boolean) => {
+      set({ packageImportConflictOpen: open });
     },
   }))
 );

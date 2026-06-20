@@ -157,7 +157,7 @@ export const TILE_TO_TOOL: Record<number, ToolId> = {
 
 export interface OperationLogEntry {
   id: string;
-  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new';
+  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new' | 'export_package' | 'import_package' | 'import_package_conflict_replace' | 'import_package_conflict_rename' | 'import_package_conflict_skip' | 'import_package_failed';
   snapshotId?: string;
   snapshotName?: string;
   timestamp: number;
@@ -178,8 +178,34 @@ export interface DraftSnapshot {
 
 export type ImportConflictResolution = 'overwrite' | 'save_as_new' | 'cancel';
 
+export type SnapshotConflictStrategy = 'replace' | 'rename' | 'skip';
+
+export interface SnapshotPackage {
+  packageVersion: string;
+  exportedAt: number;
+  currentLevel: LevelData;
+  currentHistory: HistoryState;
+  lastValidation: ValidationResult | null;
+  snapshots: DraftSnapshot[];
+  activeSnapshotId: string | null;
+  operationLog: OperationLogEntry[];
+  editorMeta: {
+    levelName: string;
+  };
+}
+
+export interface SnapshotPackageImportResult {
+  success: boolean;
+  errors: string[];
+  warnings: string[];
+  mergedSnapshots: DraftSnapshot[];
+  logEntries: { action: OperationLogEntry['action']; detail: string; snapshotName?: string }[];
+}
+
 export const DATA_VERSION = '1.0.0';
+export const SNAPSHOT_PACKAGE_VERSION = '1.0.0';
 export const STORAGE_KEY = 'puzzle-editor:v1:state';
 export const SNAPSHOT_STORAGE_KEY = 'puzzle-editor:v1:snapshots';
 export const OPERATION_LOG_KEY = 'puzzle-editor:v1:operation-log';
 export const ACTIVE_SNAPSHOT_KEY = 'puzzle-editor:v1:active-snapshot';
+export const PACKAGE_TYPE_IDENTIFIER = 'puzzle-editor-snapshot-package';
