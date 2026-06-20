@@ -9,8 +9,10 @@ import {
   CheckCircle,
   ChevronDown,
   Camera,
+  BookOpen,
 } from 'lucide-react';
 import { useEditorStore } from '@/store/useEditorStore';
+import { useCampaignStore } from '@/store/useCampaignStore';
 import { cn } from '@/lib/utils';
 
 const SAMPLE_LABELS = ['新手教程', '经典推箱', '机关迷宫'];
@@ -23,6 +25,9 @@ export default function Toolbar() {
   const snapshots = useEditorStore((s) => s.snapshots);
   const snapshotPanelOpen = useEditorStore((s) => s.snapshotPanelOpen);
   const setSnapshotPanelOpen = useEditorStore((s) => s.setSnapshotPanelOpen);
+  const campaigns = useCampaignStore((s) => s.campaigns);
+  const campaignPanelOpen = useCampaignStore((s) => s.campaignPanelOpen);
+  const setCampaignPanelOpen = useCampaignStore((s) => s.setCampaignPanelOpen);
 
   const newLevel = useEditorStore((s) => s.newLevel);
   const loadSample = useEditorStore((s) => s.loadSample);
@@ -186,6 +191,19 @@ export default function Toolbar() {
           {snapshots.length > 0 && (
             <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] font-bold bg-amberx-500 text-abyss-900 rounded-full flex items-center justify-center">
               {snapshots.length}
+            </span>
+          )}
+        </button>
+
+        <button
+          className={cn('btn-ghost px-2 py-1 relative', campaignPanelOpen && 'bg-white/10')}
+          onClick={() => setCampaignPanelOpen(!campaignPanelOpen)}
+          title="战役关卡"
+        >
+          <BookOpen size={16} />
+          {campaigns.length > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] font-bold bg-emeraldx-500 text-abyss-900 rounded-full flex items-center justify-center">
+              {campaigns.length}
             </span>
           )}
         </button>

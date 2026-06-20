@@ -157,9 +157,13 @@ export const TILE_TO_TOOL: Record<number, ToolId> = {
 
 export interface OperationLogEntry {
   id: string;
-  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new' | 'export_package' | 'import_package' | 'import_package_conflict_replace' | 'import_package_conflict_rename' | 'import_package_conflict_skip' | 'import_package_failed' | 'new_level' | 'load_sample' | 'edit_level' | 'import_level' | 'persist_restore';
+  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new' | 'export_package' | 'import_package' | 'import_package_conflict_replace' | 'import_package_conflict_rename' | 'import_package_conflict_skip' | 'import_package_failed' | 'new_level' | 'load_sample' | 'edit_level' | 'import_level' | 'persist_restore' | 'campaign_create' | 'campaign_rename' | 'campaign_delete' | 'campaign_add_level' | 'campaign_remove_level' | 'campaign_reorder_levels' | 'campaign_duplicate_level' | 'campaign_rename_level' | 'campaign_update_level_meta' | 'campaign_export' | 'campaign_import' | 'campaign_import_conflict_replace_campaign' | 'campaign_import_conflict_rename_campaign' | 'campaign_import_conflict_skip_campaign' | 'campaign_import_conflict_replace_level' | 'campaign_import_conflict_rename_level' | 'campaign_import_conflict_skip_level' | 'campaign_import_failed' | 'campaign_progress_update' | 'campaign_persist_restore';
   snapshotId?: string;
   snapshotName?: string;
+  campaignId?: string;
+  campaignName?: string;
+  levelId?: string;
+  levelName?: string;
   timestamp: number;
   detail?: string;
 }
@@ -209,3 +213,121 @@ export const SNAPSHOT_STORAGE_KEY = 'puzzle-editor:v1:snapshots';
 export const OPERATION_LOG_KEY = 'puzzle-editor:v1:operation-log';
 export const ACTIVE_SNAPSHOT_KEY = 'puzzle-editor:v1:active-snapshot';
 export const PACKAGE_TYPE_IDENTIFIER = 'puzzle-editor-snapshot-package';
+
+export enum UnlockConditionType {
+  ALWAYS_UNLOCKED = 'always_unlocked',
+  PREVIOUS_LEVEL_CLEARED = 'previous_cleared',
+  PREVIOUS_LEVEL_STARS = 'previous_stars',
+  CUSTOM_CONDITION = 'custom',
+}
+
+export interface UnlockCondition {
+  type: UnlockConditionType;
+  requiredStars?: number;
+  requiredLevelId?: string;
+  customDescription?: string;
+}
+
+export interface LevelPlayResult {
+  completed: boolean;
+  steps: number;
+  stars: number;
+  completedAt: number;
+  bestSteps?: number;
+  bestStars?: number;
+}
+
+export interface CampaignLevelMeta {
+  goalDescription: string;
+  recommendedSteps: number;
+  unlockCondition: UnlockCondition;
+  notes: string;
+  starsThreshold: [number, number, number];
+}
+
+export interface CampaignLevel {
+  id: string;
+  name: string;
+  order: number;
+  levelData: LevelData;
+  meta: CampaignLevelMeta;
+  playResult?: LevelPlayResult;
+  unlocked: boolean;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface Campaign {
+  id: string;
+  name: string;
+  description: string;
+  version: string;
+  levels: CampaignLevel[];
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface CampaignProgress {
+  campaignId: string;
+  currentLevelId: string | null;
+  totalStars: number;
+  completedCount: number;
+  lastPlayedAt: number | null;
+  levelResults: Record<string, LevelPlayResult>;
+}
+
+export interface CampaignHistoryEntry {
+  campaign: Campaign;
+  progress: CampaignProgress | null;
+}
+
+export interface CampaignHistoryState {
+  past: CampaignHistoryEntry[];
+  present: Campaign;
+  future: CampaignHistoryEntry[];
+  progress: CampaignProgress | null;
+}
+
+export type CampaignConflictStrategy = 'replace' | 'rename' | 'skip';
+export type CampaignLevelConflictStrategy = 'replace' | 'rename' | 'skip';
+
+export interface CampaignPackage {
+  packageVersion: string;
+  exportedAt: number;
+  campaign: Campaign;
+  progress?: CampaignProgress;
+  operationLog: OperationLogEntry[];
+}
+
+export interface CampaignPackageImportResult {
+  success: boolean;
+  errors: string[];
+  warnings: string[];
+  mergedCampaigns: Campaign[];
+  logEntries: { action: OperationLogEntry['action']; detail: string; campaignName?: string; levelName?: string }[];
+}
+
+export interface CampaignStoreState {
+  campaigns: Campaign[];
+  activeCampaignId: string | null;
+  selectedLevelId: string | null;
+  progressMap: Record<string, CampaignProgress>;
+  campaignPanelOpen: boolean;
+  levelMetaEditorOpen: boolean;
+  editingLevelId: string | null;
+  operationLog: OperationLogEntry[];
+
+  pendingCampaignImport: CampaignPackage | null;
+  pendingCampaignImportJson: string | null;
+  campaignImportConflictOpen: boolean;
+  detectedCampaignConflicts: string[];
+  detectedLevelConflicts: { campaignId: string; campaignName: string; levelNames: string[] }[];
+}
+
+export const CAMPAIGN_PACKAGE_VERSION = '1.0.0';
+export const CAMPAIGN_STORAGE_KEY = 'puzzle-editor:v1:campaigns';
+export const CAMPAIGN_PROGRESS_KEY = 'puzzle-editor:v1:campaign-progress';
+export const ACTIVE_CAMPAIGN_KEY = 'puzzle-editor:v1:active-campaign';
+export const SELECTED_LEVEL_KEY = 'puzzle-editor:v1:selected-level';
+export const CAMPAIGN_TYPE_IDENTIFIER = 'puzzle-editor-campaign-package';
+export const CAMPAIGN_OPERATION_LOG_KEY = 'puzzle-editor:v1:campaign-operation-log';

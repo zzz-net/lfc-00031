@@ -3,7 +3,7 @@ import { useEditorStore } from '@/store/useEditorStore';
 import { Camera, RotateCcw, Trash2, Edit3, Check, X, History, ChevronDown, ChevronRight, Download, Upload } from 'lucide-react';
 import type { DraftSnapshot, OperationLogEntry } from '@/types';
 
-const ACTION_LABELS: Record<OperationLogEntry['action'], string> = {
+const ACTION_LABELS: Partial<Record<OperationLogEntry['action'], string>> = {
   save_snapshot: '💾 保存快照',
   rename_snapshot: '✏️ 重命名',
   delete_snapshot: '🗑️ 删除快照',

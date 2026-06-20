@@ -50,6 +50,7 @@ interface EditorState {
   validate: () => ValidationResult;
   exportLevel: () => void;
   importLevel: (jsonStr: string) => boolean;
+  loadLevelData: (level: LevelData, pushHistory?: boolean) => void;
   saveDraft: () => void;
   restoreFromStorage: () => void;
   setLevelName: (name: string) => void;
@@ -438,6 +439,33 @@ export const useEditorStore = create<EditorState>()(
       get().persistSnapshots();
       get().addToast('success', `已导入关卡：${result.level.name}`);
       return true;
+    },
+
+    loadLevelData: (level: LevelData, pushHistory = true) => {
+      const { past, present, lastValidation } = get();
+      const newLevel = { ...level, updatedAt: Date.now() };
+      if (pushHistory) {
+        const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, newLevel);
+        set({
+          past: newPast,
+          present: newPresent,
+          future: [],
+          lastValidation: null,
+          simulationState: null,
+          isRecording: false,
+          currentStepIndex: -1,
+          activeSnapshotId: null,
+        });
+      } else {
+        set({
+          present: newLevel,
+          lastValidation: null,
+          simulationState: null,
+          isRecording: false,
+          currentStepIndex: -1,
+          activeSnapshotId: null,
+        });
+      }
     },
 
     saveDraft: () => {

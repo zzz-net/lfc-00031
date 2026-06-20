@@ -1,5 +1,5 @@
-import type { LevelData, Position, SwitchDoorRule, LevelRules, MoveStep, SnapshotPackage, DraftSnapshot, HistoryState, ValidationResult, OperationLogEntry, SnapshotConflictStrategy, SnapshotPackageImportResult } from '@/types';
-import { TileType as TT, WinCondition, Direction, DATA_VERSION, SNAPSHOT_PACKAGE_VERSION, PACKAGE_TYPE_IDENTIFIER } from '@/types';
+import type { LevelData, Position, SwitchDoorRule, LevelRules, MoveStep, SnapshotPackage, DraftSnapshot, HistoryState, ValidationResult, OperationLogEntry, SnapshotConflictStrategy, SnapshotPackageImportResult, Campaign, CampaignLevel, CampaignLevelMeta, UnlockCondition, LevelPlayResult, CampaignProgress, CampaignPackage, CampaignPackageImportResult, CampaignConflictStrategy, CampaignLevelConflictStrategy, UnlockConditionType } from '@/types';
+import { TileType as TT, WinCondition, Direction, DATA_VERSION, SNAPSHOT_PACKAGE_VERSION, PACKAGE_TYPE_IDENTIFIER, CAMPAIGN_PACKAGE_VERSION, CAMPAIGN_TYPE_IDENTIFIER, UnlockConditionType as UCT } from '@/types';
 import { createEmptyTiles, findPositions } from './mapOps';
 
 function makeSwitchId(pos: Position): string {
@@ -702,5 +702,835 @@ export function importSnapshotPackageWithMerge(
     warnings,
     mergedSnapshots: mergeResult.mergedSnapshots,
     logEntries: allLogEntries,
+  };
+}
+
+export function createDefaultMeta(): CampaignLevelMeta {
+  return {
+    goalDescription: '完成关卡目标',
+    recommendedSteps: 20,
+    unlockCondition: {
+      type: UCT.ALWAYS_UNLOCKED,
+    },
+    notes: '',
+    starsThreshold: [10, 15, 20],
+  };
+}
+
+let campaignIdCounter = 0;
+let campaignLevelIdCounter = 0;
+
+export function genCampaignId(): string {
+  return `camp_${Date.now()}_${++campaignIdCounter}`;
+}
+
+export function genCampaignLevelId(): string {
+  return `clevel_${Date.now()}_${++campaignLevelIdCounter}`;
+}
+
+export function createCampaignLevel(name: string, levelData: LevelData, order = 0): CampaignLevel {
+  const now = Date.now();
+  return {
+    id: genCampaignLevelId(),
+    name,
+    order,
+    levelData: JSON.parse(JSON.stringify(levelData)),
+    meta: createDefaultMeta(),
+    unlocked: true,
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createCampaign(name: string, description = ''): Campaign {
+  const now = Date.now();
+  return {
+    id: genCampaignId(),
+    name,
+    description,
+    version: '1.0.0',
+    levels: [],
+    createdAt: now,
+    updatedAt: now,
+  };
+}
+
+export function createCampaignProgress(campaignId: string): CampaignProgress {
+  return {
+    campaignId,
+    currentLevelId: null,
+    totalStars: 0,
+    completedCount: 0,
+    lastPlayedAt: null,
+    levelResults: {},
+  };
+}
+
+function validateUnlockCondition(obj: unknown): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return ['解锁条件不是对象'];
+  }
+  const o = obj as Record<string, unknown>;
+  if (typeof o.type !== 'string') {
+    errors.push('解锁条件缺少 type 字段');
+  } else {
+    const validTypes = new Set(Object.values(UCT) as string[]);
+    if (!validTypes.has(o.type)) {
+      errors.push(`不支持的解锁条件类型: ${o.type}`);
+    }
+  }
+  return errors;
+}
+
+function validateCampaignLevelMeta(obj: unknown): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return ['关卡元数据不是对象'];
+  }
+  const o = obj as Record<string, unknown>;
+  if (typeof o.goalDescription !== 'string') errors.push('缺少 goalDescription 或类型错误');
+  if (typeof o.recommendedSteps !== 'number') errors.push('缺少 recommendedSteps 或类型错误');
+  if (typeof o.notes !== 'string') errors.push('缺少 notes 或类型错误');
+  if (!o.unlockCondition) {
+    errors.push('缺少 unlockCondition');
+  } else {
+    errors.push(...validateUnlockCondition(o.unlockCondition).map((e) => `unlockCondition: ${e}`));
+  }
+  if (!Array.isArray(o.starsThreshold)) {
+    errors.push('缺少 starsThreshold 或不是数组');
+  } else if (o.starsThreshold.length !== 3) {
+    errors.push('starsThreshold 必须是 3 个元素的数组');
+  }
+  return errors;
+}
+
+function validateLevelPlayResult(obj: unknown): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return ['游玩结果不是对象'];
+  }
+  const o = obj as Record<string, unknown>;
+  if (typeof o.completed !== 'boolean') errors.push('缺少 completed 或类型错误');
+  if (typeof o.steps !== 'number') errors.push('缺少 steps 或类型错误');
+  if (typeof o.stars !== 'number') errors.push('缺少 stars 或类型错误');
+  if (typeof o.completedAt !== 'number') errors.push('缺少 completedAt 或类型错误');
+  return errors;
+}
+
+function validateCampaignLevel(obj: unknown, index: number): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return [`关卡 ${index + 1}: 不是对象`];
+  }
+  const o = obj as Record<string, unknown>;
+  if (typeof o.id !== 'string') errors.push(`关卡 ${index + 1}: 缺少 id`);
+  if (typeof o.name !== 'string') errors.push(`关卡 ${index + 1}: 缺少 name`);
+  if (typeof o.order !== 'number') errors.push(`关卡 ${index + 1}: 缺少 order`);
+  if (typeof o.unlocked !== 'boolean') errors.push(`关卡 ${index + 1}: 缺少 unlocked`);
+  if (typeof o.createdAt !== 'number') errors.push(`关卡 ${index + 1}: 缺少 createdAt`);
+  if (typeof o.updatedAt !== 'number') errors.push(`关卡 ${index + 1}: 缺少 updatedAt`);
+
+  if (!o.levelData || typeof o.levelData !== 'object') {
+    errors.push(`关卡 ${index + 1}: 缺少 levelData`);
+  } else {
+    const levelErrors = validateImportStructure(o.levelData);
+    if (!levelErrors.ok) {
+      errors.push(...levelErrors.errors.map((e) => `关卡 ${index + 1}.levelData: ${e}`));
+    }
+  }
+
+  if (!o.meta || typeof o.meta !== 'object') {
+    errors.push(`关卡 ${index + 1}: 缺少 meta`);
+  } else {
+    errors.push(...validateCampaignLevelMeta(o.meta).map((e) => `关卡 ${index + 1}.meta: ${e}`));
+  }
+
+  if (o.playResult !== undefined && o.playResult !== null) {
+    errors.push(...validateLevelPlayResult(o.playResult).map((e) => `关卡 ${index + 1}.playResult: ${e}`));
+  }
+
+  return errors;
+}
+
+function validateCampaignProgress(obj: unknown): string[] {
+  const errors: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return ['进度数据不是对象'];
+  }
+  const o = obj as Record<string, unknown>;
+  if (typeof o.campaignId !== 'string') errors.push('缺少 campaignId 或类型错误');
+  if (typeof o.totalStars !== 'number') errors.push('缺少 totalStars 或类型错误');
+  if (typeof o.completedCount !== 'number') errors.push('缺少 completedCount 或类型错误');
+  if (!o.levelResults || typeof o.levelResults !== 'object') {
+    errors.push('缺少 levelResults 或类型错误');
+  }
+  return errors;
+}
+
+export function validateCampaignStructure(obj: unknown): { ok: boolean; valid: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { ok: false, valid: false, errors: ['战役包根元素必须是对象'], warnings };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.id !== 'string') errors.push('缺少 id 或类型错误');
+  if (typeof o.name !== 'string') errors.push('缺少 name 或类型错误');
+  if (typeof o.description !== 'string') errors.push('缺少 description 或类型错误');
+  if (typeof o.version !== 'string') errors.push('缺少 version 或类型错误');
+  if (typeof o.createdAt !== 'number') errors.push('缺少 createdAt 或类型错误');
+  if (typeof o.updatedAt !== 'number') errors.push('缺少 updatedAt 或类型错误');
+
+  if (!Array.isArray(o.levels)) {
+    errors.push('缺少 levels 或不是数组');
+  } else {
+    for (let i = 0; i < o.levels.length; i++) {
+      errors.push(...validateCampaignLevel(o.levels[i], i));
+    }
+  }
+
+  const ok = errors.length === 0;
+  return { ok, valid: ok, errors, warnings };
+}
+
+export function validateCampaignPackageStructure(obj: unknown): { ok: boolean; valid: boolean; errors: string[]; warnings: string[] } {
+  const errors: string[] = [];
+  const warnings: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { ok: false, valid: false, errors: ['战役包根元素必须是对象'], warnings };
+  }
+  const envelope = obj as Record<string, unknown>;
+
+  if (envelope._type !== CAMPAIGN_TYPE_IDENTIFIER) {
+    return { ok: false, valid: false, errors: ['不是合法的战役包文件（缺少类型标识）'], warnings };
+  }
+
+  const data = envelope.data as Record<string, unknown> | undefined;
+  if (!data || typeof data !== 'object') {
+    return { ok: false, valid: false, errors: ['战役包缺少 data 字段'], warnings };
+  }
+
+  if (typeof data.packageVersion !== 'string') {
+    errors.push('缺少 packageVersion 或类型错误');
+  } else {
+    const versionCheck = checkCampaignVersionCompatibility(data.packageVersion);
+    if (!versionCheck.compatible) {
+      errors.push(...versionCheck.errors);
+    }
+    warnings.push(...versionCheck.warnings);
+  }
+
+  if (typeof data.exportedAt !== 'number') {
+    errors.push('缺少 exportedAt 或类型错误');
+  }
+
+  if (!data.campaign || typeof data.campaign !== 'object') {
+    errors.push('缺少 campaign 或格式错误');
+  } else {
+    const campaignCheck = validateCampaignStructure(data.campaign);
+    if (!campaignCheck.ok) {
+      errors.push(...campaignCheck.errors.map((e) => `campaign: ${e}`));
+    }
+    warnings.push(...campaignCheck.warnings);
+  }
+
+  if (data.progress !== undefined && data.progress !== null) {
+    const progressErrors = validateCampaignProgress(data.progress);
+    errors.push(...progressErrors.map((e) => `progress: ${e}`));
+  }
+
+  if (!Array.isArray(data.operationLog)) {
+    errors.push('缺少 operationLog 或不是数组');
+  }
+
+  const ok = errors.length === 0;
+  return { ok, valid: ok, errors, warnings };
+}
+
+export function checkCampaignVersionCompatibility(pkgVersion: string, currentVersion: string = CAMPAIGN_PACKAGE_VERSION): { compatible: boolean; warnings: string[]; warning: boolean; errors: string[] } {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  const currentMajor = currentVersion.split('.')[0];
+  const pkgMajor = pkgVersion.split('.')[0];
+
+  if (currentMajor !== pkgMajor) {
+    errors.push(`战役包版本 ${pkgVersion} 与当前版本 ${currentVersion} 主版本号不兼容，无法导入`);
+    return { compatible: false, warnings, warning: warnings.length > 0, errors };
+  }
+
+  const cmp = compareSemver(pkgVersion, currentVersion);
+  if (cmp > 0) {
+    warnings.push(`战役包版本 ${pkgVersion} 高于当前版本 ${currentVersion}，部分字段可能无法识别，将尝试兼容导入`);
+  } else if (cmp < 0) {
+    warnings.push(`战役包版本 ${pkgVersion} 低于当前版本 ${currentVersion}，将按旧格式兼容导入`);
+  }
+
+  return { compatible: true, warnings, warning: warnings.length > 0, errors };
+}
+
+export function exportCampaignPackage(params: {
+  campaign: Campaign;
+  progress?: CampaignProgress;
+  operationLog: OperationLogEntry[];
+}): string {
+  const pkg: CampaignPackage = {
+    packageVersion: CAMPAIGN_PACKAGE_VERSION,
+    exportedAt: Date.now(),
+    campaign: JSON.parse(JSON.stringify(params.campaign)),
+    progress: params.progress ? JSON.parse(JSON.stringify(params.progress)) : undefined,
+    operationLog: JSON.parse(JSON.stringify(params.operationLog)),
+  };
+  const envelope = {
+    _type: CAMPAIGN_TYPE_IDENTIFIER,
+    data: pkg,
+  };
+  return JSON.stringify(envelope, null, 2);
+}
+
+export function parseCampaignPackage(str: string): { pkg: CampaignPackage | null; errors: string[]; warnings: string[] } {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(str);
+  } catch {
+    return { pkg: null, errors: ['JSON 解析失败：格式不合法'], warnings: [] };
+  }
+
+  const allWarnings: string[] = [];
+  const allErrors: string[] = [];
+
+  if (!parsed || typeof parsed !== 'object') {
+    return { pkg: null, errors: ['战役包根元素必须是对象'], warnings: [] };
+  }
+  const envelope = parsed as Record<string, unknown>;
+
+  if (envelope._type !== CAMPAIGN_TYPE_IDENTIFIER) {
+    return { pkg: null, errors: ['不是合法的战役包文件（缺少类型标识）'], warnings: [] };
+  }
+
+  const data = envelope.data as Record<string, unknown> | undefined;
+  if (!data || typeof data !== 'object') {
+    return { pkg: null, errors: ['战役包缺少 data 字段'], warnings: [] };
+  }
+
+  let packageVersion = CAMPAIGN_PACKAGE_VERSION;
+  if (typeof data.packageVersion === 'string') {
+    packageVersion = data.packageVersion;
+    const versionCheck = checkCampaignVersionCompatibility(packageVersion);
+    if (versionCheck.compatible) {
+      allWarnings.push(...versionCheck.warnings);
+    } else {
+      const pkgMajor = parseInt(packageVersion.split('.')[0] || '0', 10);
+      const curMajor = parseInt(CAMPAIGN_PACKAGE_VERSION.split('.')[0] || '1', 10);
+      if (pkgMajor < curMajor) {
+        allWarnings.push(...versionCheck.errors);
+        allWarnings.push('旧版本包，将尝试兼容导入，部分数据可能丢失');
+      } else {
+        allErrors.push(...versionCheck.errors);
+        return { pkg: null, errors: allErrors, warnings: allWarnings };
+      }
+    }
+  } else {
+    allWarnings.push('缺少 packageVersion 字段，使用当前版本');
+  }
+
+  let exportedAt = Date.now();
+  if (typeof data.exportedAt === 'number') {
+    exportedAt = data.exportedAt;
+  } else {
+    allWarnings.push('缺少 exportedAt 字段，使用当前时间');
+  }
+
+  let campaign: Campaign | null = null;
+  if (data.campaign && typeof data.campaign === 'object') {
+    const sanitizeResult = sanitizeCampaign(data.campaign);
+    campaign = sanitizeResult.campaign;
+    allWarnings.push(...sanitizeResult.warnings.map(w => `campaign: ${w}`));
+  }
+
+  if (!campaign) {
+    return { pkg: null, errors: ['缺少有效的 campaign 数据'], warnings: allWarnings };
+  }
+
+  let progress: CampaignProgress | undefined;
+  if (data.progress !== undefined && data.progress !== null) {
+    progress = sanitizeCampaignProgress(data.progress, campaign.id);
+    allWarnings.push('progress 数据已导入');
+  }
+
+  let operationLog: OperationLogEntry[] = [];
+  if (Array.isArray(data.operationLog)) {
+    operationLog = data.operationLog as OperationLogEntry[];
+  } else {
+    allWarnings.push('缺少 operationLog 或不是数组，已设为空数组');
+  }
+
+  const pkg: CampaignPackage = {
+    packageVersion,
+    exportedAt,
+    campaign,
+    progress,
+    operationLog,
+  };
+
+  return { pkg, errors: allErrors, warnings: allWarnings };
+}
+
+export function generateUniqueCampaignName(baseName: string, existingCampaigns: Campaign[], counter = 1): string {
+  const candidate = counter === 1 ? baseName : `${baseName} (导入 ${counter})`;
+  if (!existingCampaigns.some(c => c.name === candidate)) {
+    return candidate;
+  }
+  return generateUniqueCampaignName(baseName, existingCampaigns, counter + 1);
+}
+
+export function generateUniqueLevelName(baseName: string, existingLevels: CampaignLevel[], counter = 1): string {
+  const candidate = counter === 1 ? baseName : `${baseName} (导入 ${counter})`;
+  if (!existingLevels.some(l => l.name === candidate)) {
+    return candidate;
+  }
+  return generateUniqueLevelName(baseName, existingLevels, counter + 1);
+}
+
+export interface MergeCampaignOptions {
+  strategy: CampaignConflictStrategy;
+  levelStrategy: CampaignLevelConflictStrategy;
+  existingCampaigns: Campaign[];
+  incomingCampaign: Campaign;
+  incomingProgress?: CampaignProgress;
+}
+
+export interface MergeCampaignResult {
+  mergedCampaigns: Campaign[];
+  logEntries: { action: OperationLogEntry['action']; detail: string; campaignName?: string; levelName?: string }[];
+  resolvedCampaignId: string | null;
+  nameMap: Map<string, string>;
+  levelIdMap: Map<string, string>;
+}
+
+export function mergeCampaigns(options: MergeCampaignOptions): MergeCampaignResult {
+  const { strategy, levelStrategy, existingCampaigns, incomingCampaign, incomingProgress } = options;
+
+  const merged = [...existingCampaigns];
+  const existingNames = new Set(existingCampaigns.map((c) => c.name));
+  const existingIds = new Set(existingCampaigns.map((c) => c.id));
+  const logEntries: MergeCampaignResult['logEntries'] = [];
+  const nameMap = new Map<string, string>();
+  const levelIdMap = new Map<string, string>();
+
+  let resolvedCampaignId: string | null = null;
+
+  const nameConflict = existingNames.has(incomingCampaign.name);
+  let finalName = incomingCampaign.name;
+  let finalId = incomingCampaign.id;
+
+  if (existingIds.has(incomingCampaign.id)) {
+    finalId = `camp_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+  }
+
+  if (nameConflict) {
+    if (strategy === 'skip') {
+      logEntries.push({
+        action: 'campaign_import_conflict_skip_campaign',
+        detail: `跳过同名战役「${incomingCampaign.name}」`,
+        campaignName: incomingCampaign.name,
+      });
+      return {
+        mergedCampaigns: merged,
+        logEntries,
+        resolvedCampaignId: null,
+        nameMap,
+        levelIdMap,
+      };
+    } else if (strategy === 'replace') {
+      const idx = merged.findIndex((c) => c.name === incomingCampaign.name);
+      if (idx >= 0) {
+        const oldId = merged[idx].id;
+        merged.splice(idx, 1);
+        existingNames.delete(incomingCampaign.name);
+        existingIds.delete(oldId);
+      }
+      logEntries.push({
+        action: 'campaign_import_conflict_replace_campaign',
+        detail: `替换同名战役「${incomingCampaign.name}」`,
+        campaignName: incomingCampaign.name,
+      });
+      finalName = incomingCampaign.name;
+    } else {
+      finalName = generateUniqueCampaignName(incomingCampaign.name, merged);
+      logEntries.push({
+        action: 'campaign_import_conflict_rename_campaign',
+        detail: `重命名战役「${incomingCampaign.name}」→「${finalName}」`,
+        campaignName: finalName,
+      });
+    }
+  } else {
+    logEntries.push({
+      action: 'campaign_import',
+      detail: `导入战役「${incomingCampaign.name}」`,
+      campaignName: incomingCampaign.name,
+    });
+  }
+
+  const existingLevelNames = new Set<string>();
+  const newCampaign: Campaign = {
+    ...JSON.parse(JSON.stringify(incomingCampaign)),
+    id: finalId,
+    name: finalName,
+    levels: [],
+    updatedAt: Date.now(),
+  };
+
+  const sortedIncomingLevels = [...incomingCampaign.levels].sort((a, b) => a.order - b.order);
+
+  for (const incomingLevel of sortedIncomingLevels) {
+    const levelNameConflict = existingLevelNames.has(incomingLevel.name);
+    let finalLevelName = incomingLevel.name;
+    let finalLevelId = incomingLevel.id;
+
+    if (newCampaign.levels.some(l => l.id === incomingLevel.id)) {
+      finalLevelId = `clevel_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    }
+
+    let levelAction: OperationLogEntry['action'] | null = null;
+    let levelDetail = '';
+
+    if (levelNameConflict) {
+      if (levelStrategy === 'skip') {
+        levelAction = 'campaign_import_conflict_skip_level';
+        levelDetail = `跳过同名关卡「${incomingLevel.name}」`;
+        logEntries.push({ action: levelAction, detail: levelDetail, campaignName: finalName, levelName: incomingLevel.name });
+        continue;
+      } else if (levelStrategy === 'replace') {
+        levelAction = 'campaign_import_conflict_replace_level';
+        levelDetail = `替换同名关卡「${incomingLevel.name}」`;
+        existingLevelNames.delete(incomingLevel.name);
+      } else {
+        finalLevelName = generateUniqueLevelName(incomingLevel.name, newCampaign.levels);
+        levelAction = 'campaign_import_conflict_rename_level';
+        levelDetail = `重命名关卡「${incomingLevel.name}」→「${finalLevelName}」`;
+      }
+    }
+
+    const newLevel: CampaignLevel = {
+      ...JSON.parse(JSON.stringify(incomingLevel)),
+      id: finalLevelId,
+      name: finalLevelName,
+      order: newCampaign.levels.length,
+      updatedAt: Date.now(),
+    };
+
+    newCampaign.levels.push(newLevel);
+    existingLevelNames.add(finalLevelName);
+    levelIdMap.set(incomingLevel.id, finalLevelId);
+
+    if (levelAction) {
+      logEntries.push({ action: levelAction, detail: levelDetail, campaignName: finalName, levelName: finalLevelName });
+    }
+  }
+
+  if (incomingProgress) {
+    const newProgress: CampaignProgress = {
+      ...JSON.parse(JSON.stringify(incomingProgress)),
+      campaignId: finalId,
+      currentLevelId: incomingProgress.currentLevelId ? (levelIdMap.get(incomingProgress.currentLevelId) ?? null) : null,
+      levelResults: {},
+    };
+    for (const [levelId, result] of Object.entries(incomingProgress.levelResults)) {
+      const newLevelId = levelIdMap.get(levelId);
+      if (newLevelId) {
+        newProgress.levelResults[newLevelId] = result;
+      }
+    }
+  }
+
+  merged.push(newCampaign);
+  existingNames.add(finalName);
+  existingIds.add(finalId);
+  nameMap.set(incomingCampaign.id, finalId);
+  resolvedCampaignId = finalId;
+
+  return {
+    mergedCampaigns: merged,
+    logEntries,
+    resolvedCampaignId,
+    nameMap,
+    levelIdMap,
+  };
+}
+
+export function importCampaignPackageWithMerge(
+  jsonStr: string,
+  existingCampaigns: Campaign[],
+  strategy: CampaignConflictStrategy,
+  levelStrategy: CampaignLevelConflictStrategy,
+): CampaignPackageImportResult {
+  const parseResult = parseCampaignPackage(jsonStr);
+  if (!parseResult.pkg) {
+    return {
+      success: false,
+      errors: parseResult.errors,
+      warnings: parseResult.warnings,
+      mergedCampaigns: existingCampaigns,
+      logEntries: [{ action: 'campaign_import_failed', detail: `战役包解析失败：${parseResult.errors.join('; ')}` }],
+    };
+  }
+
+  const pkg = parseResult.pkg;
+  const warnings: string[] = [...parseResult.warnings];
+  const allLogEntries: MergeCampaignResult['logEntries'] = [];
+
+  const mergeResult = mergeCampaigns({
+    strategy,
+    levelStrategy,
+    existingCampaigns,
+    incomingCampaign: pkg.campaign,
+    incomingProgress: pkg.progress,
+  });
+
+  allLogEntries.push(...mergeResult.logEntries);
+
+  if (pkg.campaign.levels.length > 0) {
+    warnings.push(`战役「${pkg.campaign.name}」包含 ${pkg.campaign.levels.length} 个关卡`);
+  }
+
+  return {
+    success: true,
+    errors: [],
+    warnings,
+    mergedCampaigns: mergeResult.mergedCampaigns,
+    logEntries: allLogEntries,
+  };
+}
+
+export function recalculateCampaignProgress(
+  campaign: Campaign,
+  progress: CampaignProgress,
+): CampaignProgress {
+  let totalStars = 0;
+  let completedCount = 0;
+
+  for (const level of campaign.levels) {
+    const result = progress.levelResults[level.id];
+    if (result?.completed) {
+      completedCount++;
+      totalStars += result.stars;
+    }
+  }
+
+  return {
+    ...progress,
+    totalStars,
+    completedCount,
+  };
+}
+
+export function updateLevelUnlocks(campaign: Campaign, progress: CampaignProgress): Campaign {
+  const sortedLevels = [...campaign.levels].sort((a, b) => a.order - b.order);
+  const updatedLevels = sortedLevels.map((level, index) => {
+    let unlocked = false;
+    const condition = level.meta.unlockCondition;
+
+    switch (condition.type) {
+      case UCT.ALWAYS_UNLOCKED:
+        unlocked = true;
+        break;
+      case UCT.PREVIOUS_LEVEL_CLEARED:
+        if (index === 0) {
+          unlocked = true;
+        } else {
+          const prevLevel = sortedLevels[index - 1];
+          const prevResult = progress.levelResults[prevLevel.id];
+          unlocked = prevResult?.completed ?? false;
+        }
+        break;
+      case UCT.PREVIOUS_LEVEL_STARS:
+        if (index === 0) {
+          unlocked = true;
+        } else {
+          const prevLevel = sortedLevels[index - 1];
+          const prevResult = progress.levelResults[prevLevel.id];
+          const requiredStars = condition.requiredStars ?? 1;
+          unlocked = (prevResult?.stars ?? 0) >= requiredStars;
+        }
+        break;
+      case UCT.CUSTOM_CONDITION:
+        unlocked = level.unlocked ?? false;
+        break;
+    }
+
+    return { ...level, unlocked };
+  });
+
+  return {
+    ...campaign,
+    levels: updatedLevels,
+    updatedAt: Date.now(),
+  };
+}
+
+function sanitizeUnlockCondition(obj: unknown): UnlockCondition {
+  if (!obj || typeof obj !== 'object') {
+    return { type: UCT.ALWAYS_UNLOCKED };
+  }
+  const o = obj as Record<string, unknown>;
+  const validTypes = new Set(Object.values(UCT) as string[]);
+  const type = (typeof o.type === 'string' && validTypes.has(o.type)) 
+    ? o.type as UnlockConditionType 
+    : UCT.ALWAYS_UNLOCKED;
+  
+  const condition: UnlockCondition = { type };
+  if (type === UCT.PREVIOUS_LEVEL_STARS && typeof o.requiredStars === 'number') {
+    condition.requiredStars = o.requiredStars;
+  }
+  if (type === UCT.CUSTOM_CONDITION && typeof o.customDescription === 'string') {
+    condition.customDescription = o.customDescription;
+  }
+  return condition;
+}
+
+function sanitizeCampaignLevelMeta(obj: unknown): CampaignLevelMeta {
+  const defaultMeta = createDefaultMeta();
+  if (!obj || typeof obj !== 'object') {
+    return defaultMeta;
+  }
+  const o = obj as Record<string, unknown>;
+  
+  return {
+    goalDescription: typeof o.goalDescription === 'string' ? o.goalDescription : defaultMeta.goalDescription,
+    recommendedSteps: typeof o.recommendedSteps === 'number' ? o.recommendedSteps : defaultMeta.recommendedSteps,
+    unlockCondition: sanitizeUnlockCondition(o.unlockCondition),
+    notes: typeof o.notes === 'string' ? o.notes : defaultMeta.notes,
+    starsThreshold: Array.isArray(o.starsThreshold) && o.starsThreshold.length === 3
+      ? o.starsThreshold as [number, number, number]
+      : defaultMeta.starsThreshold,
+  };
+}
+
+function sanitizeCampaignLevel(obj: unknown, index: number): { level: CampaignLevel | null; warnings: string[] } {
+  const warnings: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { level: null, warnings: [`关卡 ${index + 1}: 不是对象，已跳过`] };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.id !== 'string') {
+    warnings.push(`关卡 ${index + 1}: 缺少 id，已生成新 id`);
+  }
+  if (typeof o.name !== 'string') {
+    warnings.push(`关卡 ${index + 1}: 缺少 name，已使用默认名称`);
+  }
+  if (typeof o.order !== 'number') {
+    warnings.push(`关卡 ${index + 1}: 缺少 order，已使用索引`);
+  }
+  if (typeof o.unlocked !== 'boolean') {
+    warnings.push(`关卡 ${index + 1}: 缺少 unlocked，已设为默认值`);
+  }
+  if (typeof o.createdAt !== 'number') {
+    warnings.push(`关卡 ${index + 1}: 缺少 createdAt，已使用当前时间`);
+  }
+  if (typeof o.updatedAt !== 'number') {
+    warnings.push(`关卡 ${index + 1}: 缺少 updatedAt，已使用当前时间`);
+  }
+  if (!o.levelData || typeof o.levelData !== 'object') {
+    return { level: null, warnings: [`关卡 ${index + 1}: 缺少 levelData，已跳过`] };
+  }
+
+  const levelDataResult = validateImportStructure(o.levelData);
+  if (!levelDataResult.ok) {
+    return { level: null, warnings: [`关卡 ${index + 1}: levelData 无效，已跳过: ${levelDataResult.errors.join('; ')}`] };
+  }
+
+  const meta = sanitizeCampaignLevelMeta(o.meta);
+  if (!o.meta || typeof o.meta !== 'object') {
+    warnings.push(`关卡 ${index + 1}: 缺少 meta，已使用默认元数据`);
+  }
+
+  const now = Date.now();
+  const level: CampaignLevel = {
+    id: typeof o.id === 'string' ? o.id : genCampaignLevelId(),
+    name: typeof o.name === 'string' ? o.name : `关卡 ${index + 1}`,
+    order: typeof o.order === 'number' ? o.order : index,
+    levelData: o.levelData as LevelData,
+    meta,
+    unlocked: typeof o.unlocked === 'boolean' ? o.unlocked : true,
+    createdAt: typeof o.createdAt === 'number' ? o.createdAt : now,
+    updatedAt: typeof o.updatedAt === 'number' ? o.updatedAt : now,
+  };
+
+  if (o.playResult !== undefined && o.playResult !== null) {
+    const pr = o.playResult as Record<string, unknown>;
+    if (typeof pr.completed === 'boolean' && typeof pr.steps === 'number' &&
+        typeof pr.stars === 'number' && typeof pr.completedAt === 'number') {
+      level.playResult = o.playResult as LevelPlayResult;
+    } else {
+      warnings.push(`关卡 ${index + 1}: playResult 无效，已忽略`);
+    }
+  }
+
+  return { level, warnings };
+}
+
+export function sanitizeCampaign(obj: unknown): { campaign: Campaign | null; warnings: string[] } {
+  const warnings: string[] = [];
+  if (!obj || typeof obj !== 'object') {
+    return { campaign: null, warnings: ['战役数据不是对象'] };
+  }
+  const o = obj as Record<string, unknown>;
+
+  if (typeof o.id !== 'string') warnings.push('缺少 id，已生成新 id');
+  if (typeof o.name !== 'string') warnings.push('缺少 name，已使用默认名称');
+  if (typeof o.description !== 'string') warnings.push('缺少 description，已设为空');
+  if (typeof o.version !== 'string') warnings.push('缺少 version，已使用默认版本');
+  if (typeof o.createdAt !== 'number') warnings.push('缺少 createdAt，已使用当前时间');
+  if (typeof o.updatedAt !== 'number') warnings.push('缺少 updatedAt，已使用当前时间');
+
+  const levels: CampaignLevel[] = [];
+  if (Array.isArray(o.levels)) {
+    for (let i = 0; i < o.levels.length; i++) {
+      const result = sanitizeCampaignLevel(o.levels[i], i);
+      if (result.level) {
+        levels.push(result.level);
+      }
+      warnings.push(...result.warnings);
+    }
+    levels.sort((a, b) => a.order - b.order);
+    levels.forEach((l, idx) => { l.order = idx; });
+  } else {
+    warnings.push('缺少 levels 或不是数组，已设为空数组');
+  }
+
+  const now = Date.now();
+  const campaign: Campaign = {
+    id: typeof o.id === 'string' ? o.id : genCampaignId(),
+    name: typeof o.name === 'string' ? o.name : '未命名战役',
+    description: typeof o.description === 'string' ? o.description : '',
+    version: typeof o.version === 'string' ? o.version : '1.0.0',
+    levels,
+    createdAt: typeof o.createdAt === 'number' ? o.createdAt : now,
+    updatedAt: typeof o.updatedAt === 'number' ? o.updatedAt : now,
+  };
+
+  return { campaign, warnings };
+}
+
+function sanitizeCampaignProgress(obj: unknown, campaignId: string): CampaignProgress {
+  const defaultProgress = createCampaignProgress(campaignId);
+  if (!obj || typeof obj !== 'object') {
+    return defaultProgress;
+  }
+  const o = obj as Record<string, unknown>;
+  
+  return {
+    campaignId: typeof o.campaignId === 'string' ? o.campaignId : campaignId,
+    currentLevelId: typeof o.currentLevelId === 'string' ? o.currentLevelId : null,
+    totalStars: typeof o.totalStars === 'number' ? o.totalStars : 0,
+    completedCount: typeof o.completedCount === 'number' ? o.completedCount : 0,
+    lastPlayedAt: typeof o.lastPlayedAt === 'number' ? o.lastPlayedAt : null,
+    levelResults: o.levelResults && typeof o.levelResults === 'object' 
+      ? { ...(o.levelResults as Record<string, LevelPlayResult>) }
+      : {},
   };
 }
