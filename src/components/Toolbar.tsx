@@ -8,6 +8,7 @@ import {
   Save,
   CheckCircle,
   ChevronDown,
+  Camera,
 } from 'lucide-react';
 import { useEditorStore } from '@/store/useEditorStore';
 import { cn } from '@/lib/utils';
@@ -19,6 +20,9 @@ export default function Toolbar() {
   const lastValidation = useEditorStore((s) => s.lastValidation);
   const canUndo = useEditorStore((s) => s.canUndo);
   const canRedo = useEditorStore((s) => s.canRedo);
+  const snapshots = useEditorStore((s) => s.snapshots);
+  const snapshotPanelOpen = useEditorStore((s) => s.snapshotPanelOpen);
+  const setSnapshotPanelOpen = useEditorStore((s) => s.setSnapshotPanelOpen);
 
   const newLevel = useEditorStore((s) => s.newLevel);
   const loadSample = useEditorStore((s) => s.loadSample);
@@ -26,7 +30,7 @@ export default function Toolbar() {
   const redo = useEditorStore((s) => s.redo);
   const validate = useEditorStore((s) => s.validate);
   const exportLevel = useEditorStore((s) => s.exportLevel);
-  const importLevel = useEditorStore((s) => s.importLevel);
+  const requestImportWithConflict = useEditorStore((s) => s.requestImportWithConflict);
   const saveDraft = useEditorStore((s) => s.saveDraft);
   const setLevelName = useEditorStore((s) => s.setLevelName);
   const resizeLevelTo = useEditorStore((s) => s.resizeLevelTo);
@@ -47,12 +51,12 @@ export default function Toolbar() {
       const reader = new FileReader();
       reader.onload = (ev) => {
         const text = ev.target?.result as string;
-        importLevel(text);
+        requestImportWithConflict(text);
       };
       reader.readAsText(file);
       e.target.value = '';
     },
-    [importLevel],
+    [requestImportWithConflict],
   );
 
   const handleApplyResize = useCallback(() => {
@@ -171,6 +175,19 @@ export default function Toolbar() {
 
         <button className="btn-ghost px-2 py-1" onClick={saveDraft} title="保存草稿">
           <Save size={16} />
+        </button>
+
+        <button
+          className={cn('btn-ghost px-2 py-1 relative', snapshotPanelOpen && 'bg-white/10')}
+          onClick={() => setSnapshotPanelOpen(!snapshotPanelOpen)}
+          title="草稿快照"
+        >
+          <Camera size={16} />
+          {snapshots.length > 0 && (
+            <span className="absolute -top-1 -right-1 min-w-[16px] h-4 px-1 text-[10px] font-bold bg-amberx-500 text-abyss-900 rounded-full flex items-center justify-center">
+              {snapshots.length}
+            </span>
+          )}
         </button>
 
         <button

@@ -1,7 +1,7 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import type { LevelData, ToolId, SimulationState, ValidationResult, ToastMessage, Direction, LevelRules, SwitchDoorRule, WinCondition, HistoryEntry } from '@/types';
-import { TileType, DATA_VERSION, STORAGE_KEY, TILE_TO_TOOL } from '@/types';
+import type { LevelData, ToolId, SimulationState, ValidationResult, ToastMessage, Direction, LevelRules, SwitchDoorRule, WinCondition, HistoryEntry, DraftSnapshot, OperationLogEntry, ImportConflictResolution } from '@/types';
+import { TileType, DATA_VERSION, STORAGE_KEY, TILE_TO_TOOL, SNAPSHOT_STORAGE_KEY, OPERATION_LOG_KEY, ACTIVE_SNAPSHOT_KEY } from '@/types';
 import { setTile, rebuildDerivedFromTiles, resizeLevel, cloneTiles, createEmptyTiles } from '@/utils/mapOps';
 import { simulateMove, initialSimulationState, applyMoveLog } from '@/utils/simulation';
 import { validateLevel } from '@/utils/validator';
@@ -19,6 +19,15 @@ interface EditorState {
   toasts: ToastMessage[];
   rulesPanelOpen: boolean;
   gridZoom: number;
+
+  snapshots: DraftSnapshot[];
+  activeSnapshotId: string | null;
+  operationLog: OperationLogEntry[];
+  pendingImportLevel: LevelData | null;
+  pendingImportJson: string | null;
+  importConflictOpen: boolean;
+  snapshotPanelOpen: boolean;
+  deleteConfirmSnapshotId: string | null;
 
   newLevel: (width?: number, height?: number) => void;
   loadSample: (index: number) => void;
@@ -49,9 +58,35 @@ interface EditorState {
   setRulesPanelOpen: (open: boolean) => void;
   setGridZoom: (zoom: number) => void;
   persist: () => void;
+
+  saveSnapshot: (name: string) => DraftSnapshot;
+  renameSnapshot: (id: string, newName: string) => void;
+  deleteSnapshot: (id: string) => void;
+  rollbackToSnapshot: (id: string) => void;
+  setActiveSnapshotId: (id: string | null) => void;
+  setSnapshotPanelOpen: (open: boolean) => void;
+  setDeleteConfirmSnapshotId: (id: string | null) => void;
+
+  requestImportWithConflict: (jsonStr: string) => void;
+  resolveImportConflict: (resolution: ImportConflictResolution) => void;
+  setImportConflictOpen: (open: boolean) => void;
+
+  persistSnapshots: () => void;
+  restoreSnapshotsFromStorage: () => void;
+  addOperationLog: (action: OperationLogEntry['action'], detail?: string, snapshotId?: string, snapshotName?: string) => void;
 }
 
 let toastCounter = 0;
+let snapIdCounter = 0;
+let opLogIdCounter = 0;
+
+function genSnapshotId(): string {
+  return `snap_${Date.now()}_${++snapIdCounter}`;
+}
+
+function genOpLogId(): string {
+  return `op_${Date.now()}_${++opLogIdCounter}`;
+}
 
 function pushToHistory(past: HistoryEntry[], present: LevelData, lastValidation: ValidationResult | null, newPresent: LevelData): { past: HistoryEntry[]; present: LevelData } {
   return {
@@ -74,6 +109,15 @@ export const useEditorStore = create<EditorState>()(
     rulesPanelOpen: false,
     gridZoom: 1,
 
+    snapshots: [],
+    activeSnapshotId: null,
+    operationLog: [],
+    pendingImportLevel: null,
+    pendingImportJson: null,
+    importConflictOpen: false,
+    snapshotPanelOpen: false,
+    deleteConfirmSnapshotId: null,
+
     newLevel: (width = 8, height = 8) => {
       const level = createDefaultLevel(width, height);
       set({
@@ -84,6 +128,7 @@ export const useEditorStore = create<EditorState>()(
         simulationState: null,
         isRecording: false,
         currentStepIndex: -1,
+        activeSnapshotId: null,
       });
       get().addToast('info', `已创建 ${width}×${height} 新关卡`);
     },
@@ -102,6 +147,7 @@ export const useEditorStore = create<EditorState>()(
         simulationState: null,
         isRecording: false,
         currentStepIndex: -1,
+        activeSnapshotId: null,
       });
       get().addToast('success', `已加载样例：${samples[index].name}`);
     },
@@ -427,6 +473,234 @@ export const useEditorStore = create<EditorState>()(
       } catch {
         get().addToast('error', '保存失败：存储空间不足');
       }
+    },
+
+    saveSnapshot: (name: string) => {
+      const { present, past, future, lastValidation, snapshots } = get();
+      const id = genSnapshotId();
+      const snap: DraftSnapshot = {
+        id,
+        name,
+        createdAt: Date.now(),
+        level: JSON.parse(JSON.stringify(present)),
+        moveLog: [...present.moveLog],
+        moveLogInvalidated: present.moveLogInvalidated,
+        pastLength: past.length,
+        futureLength: future.length,
+        lastValidation: lastValidation ? JSON.parse(JSON.stringify(lastValidation)) : null,
+      };
+      const newSnapshots = [...snapshots, snap];
+      set({ snapshots: newSnapshots, activeSnapshotId: id });
+      get().addOperationLog('save_snapshot', `保存快照「${name}」`, id, name);
+      get().persistSnapshots();
+      get().addToast('success', `快照「${name}」已保存`);
+      return snap;
+    },
+
+    renameSnapshot: (id: string, newName: string) => {
+      const { snapshots } = get();
+      const snap = snapshots.find((s) => s.id === id);
+      if (!snap) return;
+      const oldName = snap.name;
+      const newSnapshots = snapshots.map((s) =>
+        s.id === id ? { ...s, name: newName } : s
+      );
+      set({ snapshots: newSnapshots });
+      get().addOperationLog('rename_snapshot', `重命名「${oldName}」→「${newName}」`, id, newName);
+      get().persistSnapshots();
+      get().addToast('info', `快照已重命名为「${newName}」`);
+    },
+
+    deleteSnapshot: (id: string) => {
+      const { snapshots, activeSnapshotId } = get();
+      const snap = snapshots.find((s) => s.id === id);
+      if (!snap) return;
+      const newSnapshots = snapshots.filter((s) => s.id !== id);
+      const newActiveId = activeSnapshotId === id ? null : activeSnapshotId;
+      set({ snapshots: newSnapshots, activeSnapshotId: newActiveId, deleteConfirmSnapshotId: null });
+      get().addOperationLog('delete_snapshot', `删除快照「${snap.name}」`, id, snap.name);
+      get().persistSnapshots();
+      get().addToast('info', `快照「${snap.name}」已删除`);
+    },
+
+    rollbackToSnapshot: (id: string) => {
+      const { snapshots, present, past, lastValidation } = get();
+      const snap = snapshots.find((s) => s.id === id);
+      if (!snap) {
+        get().addToast('error', '快照不存在');
+        return;
+      }
+      const rolledLevel: LevelData = {
+        ...JSON.parse(JSON.stringify(snap.level)),
+        moveLog: [...snap.moveLog],
+        moveLogInvalidated: snap.moveLogInvalidated,
+        updatedAt: Date.now(),
+      };
+      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, rolledLevel);
+      set({
+        past: newPast,
+        present: newPresent,
+        future: [],
+        lastValidation: snap.lastValidation ? JSON.parse(JSON.stringify(snap.lastValidation)) : null,
+        simulationState: null,
+        isRecording: false,
+        currentStepIndex: -1,
+        activeSnapshotId: id,
+      });
+      get().addOperationLog('rollback', `回滚到快照「${snap.name}」`, id, snap.name);
+      get().persistSnapshots();
+      get().addToast('success', `已回滚到快照「${snap.name}」`);
+    },
+
+    setActiveSnapshotId: (id: string | null) => {
+      set({ activeSnapshotId: id });
+      try {
+        localStorage.setItem(ACTIVE_SNAPSHOT_KEY, id ?? '');
+      } catch { /* ignore */ }
+    },
+
+    setSnapshotPanelOpen: (open: boolean) => {
+      set({ snapshotPanelOpen: open });
+    },
+
+    setDeleteConfirmSnapshotId: (id: string | null) => {
+      set({ deleteConfirmSnapshotId: id });
+    },
+
+    requestImportWithConflict: (jsonStr: string) => {
+      const result = importFromJSON(jsonStr);
+      if (!result.level) {
+        for (const err of result.errors) {
+          get().addToast('error', `导入失败：${err}`);
+        }
+        return;
+      }
+      const { present, snapshots, past } = get();
+      const hasExistingWork =
+        past.length > 0 ||
+        present.moveLog.length > 0 ||
+        snapshots.length > 0;
+      if (!hasExistingWork) {
+        const { past: currentPast, present: currentPresent, lastValidation: currentValidation } = get();
+        const { past: newPast, present: newPresent } = pushToHistory(currentPast, currentPresent, currentValidation, result.level);
+        set({
+          past: newPast,
+          present: newPresent,
+          future: [],
+          lastValidation: null,
+          simulationState: null,
+          isRecording: false,
+          currentStepIndex: -1,
+        });
+        get().addToast('success', `已导入关卡：${result.level.name}`);
+        return;
+      }
+      set({
+        pendingImportLevel: result.level,
+        pendingImportJson: jsonStr,
+        importConflictOpen: true,
+      });
+    },
+
+    resolveImportConflict: (resolution: ImportConflictResolution) => {
+      const { pendingImportLevel, pendingImportJson, past, present, lastValidation } = get();
+      if (resolution === 'cancel') {
+        set({ pendingImportLevel: null, pendingImportJson: null, importConflictOpen: false });
+        get().addToast('info', '导入已取消');
+        return;
+      }
+      if (!pendingImportLevel) {
+        set({ importConflictOpen: false });
+        return;
+      }
+      if (resolution === 'overwrite') {
+        const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, pendingImportLevel);
+        set({
+          past: newPast,
+          present: newPresent,
+          future: [],
+          lastValidation: null,
+          simulationState: null,
+          isRecording: false,
+          currentStepIndex: -1,
+          pendingImportLevel: null,
+          pendingImportJson: null,
+          importConflictOpen: false,
+        });
+        get().addOperationLog('import_overwrite', `覆盖导入「${pendingImportLevel.name}」`);
+        get().addToast('success', `已覆盖当前关卡：${pendingImportLevel.name}`);
+      } else if (resolution === 'save_as_new') {
+        const snapName = `导入：${pendingImportLevel.name}`;
+        get().saveSnapshot(snapName);
+        const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, pendingImportLevel);
+        set({
+          past: newPast,
+          present: newPresent,
+          future: [],
+          lastValidation: null,
+          simulationState: null,
+          isRecording: false,
+          currentStepIndex: -1,
+          pendingImportLevel: null,
+          pendingImportJson: null,
+          importConflictOpen: false,
+        });
+        get().addOperationLog('import_as_new', `另存为新快照并导入「${pendingImportLevel.name}」`);
+        get().addToast('success', `已将当前状态保存为快照并导入：${pendingImportLevel.name}`);
+      }
+    },
+
+    setImportConflictOpen: (open: boolean) => {
+      set({ importConflictOpen: open });
+    },
+
+    persistSnapshots: () => {
+      const { snapshots, activeSnapshotId, operationLog } = get();
+      try {
+        localStorage.setItem(SNAPSHOT_STORAGE_KEY, JSON.stringify(snapshots));
+        localStorage.setItem(ACTIVE_SNAPSHOT_KEY, activeSnapshotId ?? '');
+        const trimmedLog = operationLog.slice(-200);
+        localStorage.setItem(OPERATION_LOG_KEY, JSON.stringify(trimmedLog));
+      } catch {
+        get().addToast('error', '快照保存失败：存储空间不足');
+      }
+    },
+
+    restoreSnapshotsFromStorage: () => {
+      try {
+        const raw = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
+        if (raw) {
+          const snapshots: DraftSnapshot[] = JSON.parse(raw);
+          if (Array.isArray(snapshots)) {
+            set({ snapshots });
+          }
+        }
+        const activeId = localStorage.getItem(ACTIVE_SNAPSHOT_KEY) || null;
+        if (activeId) {
+          set({ activeSnapshotId: activeId });
+        }
+        const logRaw = localStorage.getItem(OPERATION_LOG_KEY);
+        if (logRaw) {
+          const log: OperationLogEntry[] = JSON.parse(logRaw);
+          if (Array.isArray(log)) {
+            set({ operationLog: log });
+          }
+        }
+      } catch {
+        get().addToast('warning', '快照恢复失败');
+      }
+    },
+
+    addOperationLog: (action: OperationLogEntry['action'], detail?: string, snapshotId?: string, snapshotName?: string) => {
+      const entry: OperationLogEntry = {
+        id: genOpLogId(),
+        action,
+        snapshotId,
+        snapshotName,
+        timestamp: Date.now(),
+        detail,
+      };
+      set((s) => ({ operationLog: [...s.operationLog, entry] }));
     },
   }))
 );

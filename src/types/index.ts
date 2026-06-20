@@ -155,5 +155,31 @@ export const TILE_TO_TOOL: Record<number, ToolId> = {
   [TileType.FLOOR]: 'floor',
 };
 
+export interface OperationLogEntry {
+  id: string;
+  action: 'save_snapshot' | 'rename_snapshot' | 'delete_snapshot' | 'rollback' | 'import_overwrite' | 'import_as_new';
+  snapshotId?: string;
+  snapshotName?: string;
+  timestamp: number;
+  detail?: string;
+}
+
+export interface DraftSnapshot {
+  id: string;
+  name: string;
+  createdAt: number;
+  level: LevelData;
+  moveLog: MoveStep[];
+  moveLogInvalidated: boolean;
+  pastLength: number;
+  futureLength: number;
+  lastValidation: ValidationResult | null;
+}
+
+export type ImportConflictResolution = 'overwrite' | 'save_as_new' | 'cancel';
+
 export const DATA_VERSION = '1.0.0';
 export const STORAGE_KEY = 'puzzle-editor:v1:state';
+export const SNAPSHOT_STORAGE_KEY = 'puzzle-editor:v1:snapshots';
+export const OPERATION_LOG_KEY = 'puzzle-editor:v1:operation-log';
+export const ACTIVE_SNAPSHOT_KEY = 'puzzle-editor:v1:active-snapshot';

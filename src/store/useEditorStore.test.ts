@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useEditorStore } from '@/store/useEditorStore';
-import { createSampleLevels } from '@/utils/serializer';
-import { Direction, WinCondition, TileType, STORAGE_KEY, HistoryEntry } from '@/types';
+import { createSampleLevels, exportToJSON } from '@/utils/serializer';
+import { Direction, WinCondition, TileType, STORAGE_KEY, HistoryEntry, SNAPSHOT_STORAGE_KEY, OPERATION_LOG_KEY, ACTIVE_SNAPSHOT_KEY } from '@/types';
 
 const mockLocalStorage: Record<string, string> = {};
 vi.stubGlobal('localStorage', {
@@ -331,5 +331,377 @@ describe('文档与实现漂移回归：关键行为约束', () => {
 
     s().redo();
     expect(s().present.moveLog.length).toBe(1);
+  });
+});
+
+describe('草稿快照：保存、重命名、删除', () => {
+  it('saveSnapshot 应创建带名称和时间的快照，并设为 activeSnapshotId', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('v1');
+    expect(snap.name).toBe('v1');
+    expect(snap.createdAt).toBeTypeOf('number');
+    expect(s().snapshots.length).toBe(1);
+    expect(s().activeSnapshotId).toBe(snap.id);
+  });
+
+  it('renameSnapshot 修改快照名称但不改变当前关卡', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('old');
+    const presentBefore = JSON.stringify(s().present);
+    s().renameSnapshot(snap.id, 'new');
+    expect(s().snapshots[0].name).toBe('new');
+    expect(JSON.stringify(s().present)).toBe(presentBefore);
+  });
+
+  it('deleteSnapshot 应删除快照，若为当前活跃快照则 activeSnapshotId 置空', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('to-delete');
+    expect(s().activeSnapshotId).toBe(snap.id);
+    s().deleteSnapshot(snap.id);
+    expect(s().snapshots.length).toBe(0);
+    expect(s().activeSnapshotId).toBeNull();
+  });
+
+  it('删除非活跃快照不影响 activeSnapshotId', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap1 = s().saveSnapshot('active');
+    const snap2 = s().saveSnapshot('inactive');
+    s().setActiveSnapshotId(snap1.id);
+    s().deleteSnapshot(snap2.id);
+    expect(s().activeSnapshotId).toBe(snap1.id);
+  });
+
+  it('删除快照不改变当前关卡内容', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().saveSnapshot('v1');
+    const presentBefore = JSON.stringify(s().present);
+    s().deleteSnapshot(s().snapshots[0].id);
+    expect(JSON.stringify(s().present)).toBe(presentBefore);
+  });
+});
+
+describe('草稿快照：回滚对齐', () => {
+  it('rollbackToSnapshot 后 present/lastValidation/moveLog/simulationState 应与快照一致', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().validate();
+    const validResult = s().lastValidation;
+    expect(validResult).not.toBeNull();
+
+    const snap = s().saveSnapshot('validated');
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    expect(s().lastValidation).toBeNull();
+    expect(s().present.tiles[0][0]).toBe(TileType.FLOOR);
+
+    s().rollbackToSnapshot(snap.id);
+    expect(s().present.tiles[0][0]).toBe(level.tiles[0][0]);
+    expect(s().lastValidation).not.toBeNull();
+    expect(JSON.stringify(s().lastValidation)).toBe(JSON.stringify(validResult));
+    expect(s().simulationState).toBeNull();
+    expect(s().isRecording).toBe(false);
+    expect(s().currentStepIndex).toBe(-1);
+  });
+
+  it('回滚后 activeSnapshotId 应设为该快照 id', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('v1');
+    s().setActiveSnapshotId(null);
+    expect(s().activeSnapshotId).toBeNull();
+
+    s().rollbackToSnapshot(snap.id);
+    expect(s().activeSnapshotId).toBe(snap.id);
+  });
+
+  it('回滚后 undo 可回到回滚前的状态', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('base');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const floorPresent = JSON.stringify(s().present);
+
+    s().rollbackToSnapshot(snap.id);
+    expect(JSON.stringify(s().present)).not.toBe(floorPresent);
+
+    s().undo();
+    expect(JSON.stringify(s().present)).toBe(floorPresent);
+  });
+
+  it('回滚后 future 被清空', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('base');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().undo();
+    expect(s().future.length).toBeGreaterThan(0);
+
+    s().rollbackToSnapshot(snap.id);
+    expect(s().future.length).toBe(0);
+  });
+
+  it('回滚后再次导出 JSON 应与快照数据一致（除 updatedAt）', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().saveSnapshot('v1');
+    const snapLevel = JSON.parse(JSON.stringify(s().snapshots[0].level));
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().rollbackToSnapshot(s().snapshots[0].id);
+
+    const presentCopy = JSON.parse(JSON.stringify(s().present));
+    delete (presentCopy as Record<string, unknown>).updatedAt;
+    delete (snapLevel as Record<string, unknown>).updatedAt;
+
+    expect(JSON.stringify(presentCopy)).toBe(JSON.stringify(snapLevel));
+  });
+});
+
+describe('草稿快照：跨重启恢复', () => {
+  it('persistSnapshots 后 restoreSnapshotsFromStorage 能完整恢复快照列表和 activeSnapshotId', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap1 = s().saveSnapshot('first');
+    const snap2 = s().saveSnapshot('second');
+    s().setActiveSnapshotId(snap1.id);
+    s().persistSnapshots();
+
+    const savedSnapshots = JSON.parse(localStorage.getItem(SNAPSHOT_STORAGE_KEY) || '[]');
+    expect(savedSnapshots.length).toBe(2);
+    expect(localStorage.getItem(ACTIVE_SNAPSHOT_KEY)).toBe(snap1.id);
+
+    useEditorStore.setState({ snapshots: [], activeSnapshotId: null });
+    expect(s().snapshots.length).toBe(0);
+
+    s().restoreSnapshotsFromStorage();
+    expect(s().snapshots.length).toBe(2);
+    expect(s().activeSnapshotId).toBe(snap1.id);
+  });
+
+  it('跨重启恢复后操作记录也被恢复', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+
+    s().saveSnapshot('v1');
+    s().persistSnapshots();
+
+    const savedLog = JSON.parse(localStorage.getItem(OPERATION_LOG_KEY) || '[]');
+    expect(savedLog.length).toBeGreaterThan(0);
+
+    useEditorStore.setState({ operationLog: [] });
+    s().restoreSnapshotsFromStorage();
+    expect(s().operationLog.length).toBeGreaterThan(0);
+  });
+
+  it('恢复后的快照可以正确回滚', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('persist-test');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().persistSnapshots();
+
+    useEditorStore.setState({ snapshots: [], activeSnapshotId: null });
+    s().restoreSnapshotsFromStorage();
+
+    expect(s().snapshots.length).toBe(1);
+    s().rollbackToSnapshot(s().snapshots[0].id);
+    expect(s().present.tiles[0][0]).toBe(level.tiles[0][0]);
+  });
+});
+
+describe('导入冲突：三种结果', () => {
+  it('无已有工作时直接导入，不弹出冲突对话框', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const json = exportToJSON(level);
+    s().requestImportWithConflict(json);
+    expect(s().importConflictOpen).toBe(false);
+    expect(s().pendingImportLevel).toBeNull();
+  });
+
+  it('有已有工作时弹出冲突对话框', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const json = exportToJSON(level);
+    s().requestImportWithConflict(json);
+    expect(s().importConflictOpen).toBe(true);
+    expect(s().pendingImportLevel).not.toBeNull();
+
+    s().resolveImportConflict('cancel');
+  });
+
+  it('resolveImportConflict("cancel") 不改变当前关卡', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const presentBefore = JSON.stringify(s().present);
+
+    const json = exportToJSON(level);
+    s().requestImportWithConflict(json);
+    s().resolveImportConflict('cancel');
+
+    expect(JSON.stringify(s().present)).toBe(presentBefore);
+    expect(s().importConflictOpen).toBe(false);
+    expect(s().pendingImportLevel).toBeNull();
+  });
+
+  it('resolveImportConflict("overwrite") 用导入关卡替换当前', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const json = exportToJSON(level);
+    s().requestImportWithConflict(json);
+    s().resolveImportConflict('overwrite');
+
+    expect(s().present.tiles[0][0]).toBe(level.tiles[0][0]);
+    expect(s().importConflictOpen).toBe(false);
+    expect(s().pendingImportLevel).toBeNull();
+  });
+
+  it('resolveImportConflict("save_as_new") 保存当前状态为快照后导入', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    const floorTile = s().present.tiles[0][0];
+
+    const json = exportToJSON(level);
+    s().requestImportWithConflict(json);
+    s().resolveImportConflict('save_as_new');
+
+    expect(s().snapshots.length).toBe(1);
+    expect(s().snapshots[0].level.tiles[0][0]).toBe(floorTile);
+    expect(s().present.tiles[0][0]).toBe(level.tiles[0][0]);
+    expect(s().importConflictOpen).toBe(false);
+    expect(s().pendingImportLevel).toBeNull();
+  });
+});
+
+describe('操作记录', () => {
+  it('saveSnapshot 产生 save_snapshot 操作记录', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+
+    s().saveSnapshot('test-snap');
+    expect(s().operationLog.length).toBe(1);
+    expect(s().operationLog[0].action).toBe('save_snapshot');
+    expect(s().operationLog[0].snapshotName).toBe('test-snap');
+  });
+
+  it('rollbackToSnapshot 产生 rollback 操作记录', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+
+    const snap = s().saveSnapshot('v1');
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().rollbackToSnapshot(snap.id);
+
+    const rollbackEntries = s().operationLog.filter((e) => e.action === 'rollback');
+    expect(rollbackEntries.length).toBe(1);
+    expect(rollbackEntries[0].snapshotName).toBe('v1');
+  });
+
+  it('deleteSnapshot 产生 delete_snapshot 操作记录', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+
+    const snap = s().saveSnapshot('to-delete');
+    s().deleteSnapshot(snap.id);
+
+    const deleteEntries = s().operationLog.filter((e) => e.action === 'delete_snapshot');
+    expect(deleteEntries.length).toBe(1);
+  });
+
+  it('renameSnapshot 产生 rename_snapshot 操作记录', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [], operationLog: [] });
+
+    const snap = s().saveSnapshot('old-name');
+    s().renameSnapshot(snap.id, 'new-name');
+
+    const renameEntries = s().operationLog.filter((e) => e.action === 'rename_snapshot');
+    expect(renameEntries.length).toBe(1);
+    expect(renameEntries[0].snapshotName).toBe('new-name');
+  });
+});
+
+describe('回滚后再次导出一致性', () => {
+  it('回滚到快照后导出的 JSON 内容与快照 level 数据一致（除 updatedAt）', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('export-test');
+    const snapLevelCopy = JSON.parse(JSON.stringify(snap.level));
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    s().setTileAt(1, 1, TileType.WALL);
+
+    s().rollbackToSnapshot(snap.id);
+
+    const currentCopy = JSON.parse(JSON.stringify(s().present));
+    delete (currentCopy as Record<string, unknown>).updatedAt;
+    delete (snapLevelCopy as Record<string, unknown>).updatedAt;
+
+    expect(JSON.stringify(currentCopy)).toBe(JSON.stringify(snapLevelCopy));
+  });
+});
+
+describe('删除确认', () => {
+  it('deleteSnapshot 后 deleteConfirmSnapshotId 被清空', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    const snap = s().saveSnapshot('confirm-test');
+    s().setDeleteConfirmSnapshotId(snap.id);
+    expect(s().deleteConfirmSnapshotId).toBe(snap.id);
+
+    s().deleteSnapshot(snap.id);
+    expect(s().deleteConfirmSnapshotId).toBeNull();
   });
 });
