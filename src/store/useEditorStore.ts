@@ -485,8 +485,8 @@ export const useEditorStore = create<EditorState>()(
         level: JSON.parse(JSON.stringify(present)),
         moveLog: [...present.moveLog],
         moveLogInvalidated: present.moveLogInvalidated,
-        pastLength: past.length,
-        futureLength: future.length,
+        past: JSON.parse(JSON.stringify(past)),
+        future: JSON.parse(JSON.stringify(future)),
         lastValidation: lastValidation ? JSON.parse(JSON.stringify(lastValidation)) : null,
       };
       const newSnapshots = [...snapshots, snap];
@@ -524,23 +524,24 @@ export const useEditorStore = create<EditorState>()(
     },
 
     rollbackToSnapshot: (id: string) => {
-      const { snapshots, present, past, lastValidation } = get();
+      const { snapshots } = get();
       const snap = snapshots.find((s) => s.id === id);
       if (!snap) {
         get().addToast('error', '快照不存在');
         return;
       }
-      const rolledLevel: LevelData = {
+      const restoredPast: HistoryEntry[] = JSON.parse(JSON.stringify(snap.past));
+      const restoredFuture: HistoryEntry[] = JSON.parse(JSON.stringify(snap.future));
+      const restoredPresent: LevelData = {
         ...JSON.parse(JSON.stringify(snap.level)),
         moveLog: [...snap.moveLog],
         moveLogInvalidated: snap.moveLogInvalidated,
         updatedAt: Date.now(),
       };
-      const { past: newPast, present: newPresent } = pushToHistory(past, present, lastValidation, rolledLevel);
       set({
-        past: newPast,
-        present: newPresent,
-        future: [],
+        past: restoredPast,
+        present: restoredPresent,
+        future: restoredFuture,
         lastValidation: snap.lastValidation ? JSON.parse(JSON.stringify(snap.lastValidation)) : null,
         simulationState: null,
         isRecording: false,
@@ -670,8 +671,20 @@ export const useEditorStore = create<EditorState>()(
       try {
         const raw = localStorage.getItem(SNAPSHOT_STORAGE_KEY);
         if (raw) {
-          const snapshots: DraftSnapshot[] = JSON.parse(raw);
-          if (Array.isArray(snapshots)) {
+          const parsed: unknown[] = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            const snapshots: DraftSnapshot[] = parsed.map((rawSnap: any) => {
+              if (rawSnap && typeof rawSnap === 'object' && 'id' in rawSnap) {
+                const hasNewFormat =
+                  Array.isArray(rawSnap.past) && Array.isArray(rawSnap.future);
+                return {
+                  ...rawSnap,
+                  past: hasNewFormat ? rawSnap.past : [],
+                  future: hasNewFormat ? rawSnap.future : [],
+                } as DraftSnapshot;
+              }
+              return null as unknown as DraftSnapshot;
+            }).filter(Boolean);
             set({ snapshots });
           }
         }

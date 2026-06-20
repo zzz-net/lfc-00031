@@ -433,34 +433,76 @@ describe('草稿快照：回滚对齐', () => {
     expect(s().activeSnapshotId).toBe(snap.id);
   });
 
-  it('回滚后 undo 可回到回滚前的状态', () => {
+  it('回滚后 past 应与快照保存时完全一致（不能撤销回到修改态）', () => {
     const samples = createSampleLevels();
     const level = samples[0];
     useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
 
     const snap = s().saveSnapshot('base');
     s().setTileAt(0, 0, TileType.FLOOR);
-    const floorPresent = JSON.stringify(s().present);
+    const modifiedPastLen = s().past.length;
 
     s().rollbackToSnapshot(snap.id);
-    expect(JSON.stringify(s().present)).not.toBe(floorPresent);
 
-    s().undo();
-    expect(JSON.stringify(s().present)).toBe(floorPresent);
+    expect(s().past.length).toBe(snap.past.length);
+    for (let i = 0; i < snap.past.length; i++) {
+      expect(JSON.stringify(s().past[i])).toBe(JSON.stringify(snap.past[i]));
+    }
+
+    expect(s().past.length).toBe(modifiedPastLen - 1);
+    expect(s().canUndo()).toBe(snap.past.length > 0);
   });
 
-  it('回滚后 future 被清空', () => {
+  it('回滚后 future 应与快照保存时完全一致（不能被清空）', () => {
     const samples = createSampleLevels();
     const level = samples[0];
     useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
 
-    const snap = s().saveSnapshot('base');
     s().setTileAt(0, 0, TileType.FLOOR);
+    s().setTileAt(1, 0, TileType.FLOOR);
     s().undo();
-    expect(s().future.length).toBeGreaterThan(0);
+    s().undo();
+    expect(s().future.length).toBe(2);
+
+    const snap = s().saveSnapshot('base-future');
+    expect(snap.future.length).toBe(2);
+
+    s().redo();
+    s().redo();
+    s().setTileAt(2, 0, TileType.FLOOR);
 
     s().rollbackToSnapshot(snap.id);
+
+    expect(s().future.length).toBe(2);
+    for (let i = 0; i < snap.future.length; i++) {
+      expect(JSON.stringify(s().future[i])).toBe(JSON.stringify(snap.future[i]));
+    }
+  });
+
+  it('【回归】几乎无历史时存快照→改图→回滚：undo 不应再回到修改态', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    const originalTiles = JSON.stringify(level.tiles);
+    useEditorStore.setState({ present: level, past: [], future: [], snapshots: [] });
+
+    expect(s().past.length).toBe(0);
+
+    const snap = s().saveSnapshot('clean-slate');
+    expect(snap.past.length).toBe(0);
+    expect(snap.future.length).toBe(0);
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    expect(JSON.stringify(s().present.tiles)).not.toBe(originalTiles);
+    expect(s().past.length).toBe(1);
+
+    s().rollbackToSnapshot(snap.id);
+
+    expect(JSON.stringify(s().present.tiles)).toBe(originalTiles);
+    expect(s().past.length).toBe(0);
+    expect(s().canUndo()).toBe(false);
+
     expect(s().future.length).toBe(0);
+    expect(s().canRedo()).toBe(false);
   });
 
   it('回滚后再次导出 JSON 应与快照数据一致（除 updatedAt）', () => {

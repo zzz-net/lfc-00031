@@ -171,8 +171,8 @@ export interface DraftSnapshot {
   level: LevelData;
   moveLog: MoveStep[];
   moveLogInvalidated: boolean;
-  pastLength: number;
-  futureLength: number;
+  past: HistoryEntry[];
+  future: HistoryEntry[];
   lastValidation: ValidationResult | null;
 }
 

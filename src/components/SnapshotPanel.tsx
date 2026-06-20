@@ -131,7 +131,7 @@ function SnapshotItem({ snap, isActive }: { snap: DraftSnapshot; isActive: boole
       <div className="mt-1 flex items-center gap-3 text-[10px] text-abyss-400">
         <span>{snap.level.width}×{snap.level.height}</span>
         <span>步骤: {snap.moveLog.length}</span>
-        <span>历史: {snap.pastLength}</span>
+        <span>历史: {snap.past.length}</span>
       </div>
     </div>
   );
