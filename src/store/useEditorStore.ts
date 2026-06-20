@@ -1,6 +1,6 @@
 import { create } from 'zustand';
 import { subscribeWithSelector } from 'zustand/middleware';
-import type { LevelData, ToolId, SimulationState, ValidationResult, ToastMessage, Direction, LevelRules, SwitchDoorRule, WinCondition } from '@/types';
+import type { LevelData, ToolId, SimulationState, ValidationResult, ToastMessage, Direction, LevelRules, SwitchDoorRule, WinCondition, HistoryEntry } from '@/types';
 import { TileType, DATA_VERSION, STORAGE_KEY, TILE_TO_TOOL } from '@/types';
 import { setTile, rebuildDerivedFromTiles, resizeLevel, cloneTiles, createEmptyTiles } from '@/utils/mapOps';
 import { simulateMove, initialSimulationState, applyMoveLog } from '@/utils/simulation';
@@ -8,9 +8,9 @@ import { validateLevel } from '@/utils/validator';
 import { createDefaultLevel, createSampleLevels, exportToJSON, importFromJSON } from '@/utils/serializer';
 
 interface EditorState {
-  past: { level: LevelData; validation: ValidationResult | null }[];
+  past: HistoryEntry[];
   present: LevelData;
-  future: { level: LevelData; validation: ValidationResult | null }[];
+  future: HistoryEntry[];
   lastValidation: ValidationResult | null;
   selectedTool: ToolId;
   simulationState: SimulationState | null;
@@ -50,8 +50,6 @@ interface EditorState {
   setGridZoom: (zoom: number) => void;
   persist: () => void;
 }
-
-type HistoryEntry = { level: LevelData; validation: ValidationResult | null };
 
 let toastCounter = 0;
 

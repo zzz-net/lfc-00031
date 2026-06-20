@@ -87,10 +87,15 @@ export interface LevelData {
   updatedAt: number;
 }
 
+export interface HistoryEntry {
+  level: LevelData;
+  validation: ValidationResult | null;
+}
+
 export interface HistoryState {
-  past: LevelData[];
+  past: HistoryEntry[];
   present: LevelData;
-  future: LevelData[];
+  future: HistoryEntry[];
   lastValidation: ValidationResult | null;
 }
 

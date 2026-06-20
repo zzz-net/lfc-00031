@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { useEditorStore } from '@/store/useEditorStore';
 import { createSampleLevels } from '@/utils/serializer';
-import { Direction, WinCondition, TileType, STORAGE_KEY } from '@/types';
+import { Direction, WinCondition, TileType, STORAGE_KEY, HistoryEntry } from '@/types';
 
 const mockLocalStorage: Record<string, string> = {};
 vi.stubGlobal('localStorage', {
@@ -251,5 +251,85 @@ describe('持久化格式向前兼容', () => {
     expect(s().past[0].validation).toBeNull();
     expect(s().future.length).toBe(1);
     expect(s().future[0].level).not.toBeUndefined();
+  });
+});
+
+describe('文档与实现漂移回归：关键行为约束', () => {
+  it('HistoryEntry 类型必须同时包含 level 和 validation 字段', () => {
+    const entry: HistoryEntry = { level: createSampleLevels()[0], validation: null };
+    expect(entry.level).not.toBeUndefined();
+    expect('validation' in entry).toBe(true);
+  });
+
+  it('持久化格式中 past/future 每条记录都携带 validation 快照', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], lastValidation: null });
+
+    s().validate();
+    s().setTileAt(0, 0, TileType.FLOOR);
+
+    vi.advanceTimersByTime(800);
+    const stored = JSON.parse(localStorage.getItem(STORAGE_KEY) || '{}');
+
+    for (const entry of stored.past) {
+      expect('level' in entry).toBe(true);
+      expect('validation' in entry).toBe(true);
+    }
+    for (const entry of stored.future || []) {
+      expect('level' in entry).toBe(true);
+      expect('validation' in entry).toBe(true);
+    }
+  });
+
+  it('undo/redo 后 lastValidation 与对应历史快照一致，不是硬编码 null', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [] });
+
+    s().validate();
+    const v = s().lastValidation;
+    expect(v).not.toBeNull();
+
+    s().setTileAt(0, 0, TileType.FLOOR);
+    expect(s().lastValidation).toBeNull();
+
+    s().undo();
+    expect(s().lastValidation).not.toBeNull();
+    expect(JSON.stringify(s().lastValidation)).toBe(JSON.stringify(v));
+  });
+
+  it('单独校验后持久化触发，刷新恢复校验结果完整', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [], lastValidation: null });
+
+    s().validate();
+    expect(s().lastValidation).not.toBeNull();
+
+    vi.advanceTimersByTime(800);
+
+    useEditorStore.setState({ past: [], future: [], lastValidation: null });
+    expect(s().lastValidation).toBeNull();
+
+    s().restoreFromStorage();
+    expect(s().lastValidation).not.toBeNull();
+    expect(s().lastValidation?.valid).toBe(true);
+  });
+
+  it('录制步骤后 undo 能回退该步骤（录制步骤进入撤销历史）', () => {
+    const samples = createSampleLevels();
+    const level = samples[0];
+    useEditorStore.setState({ present: level, past: [], future: [] });
+
+    s().startRecording();
+    s().recordStep(Direction.RIGHT);
+    expect(s().present.moveLog.length).toBe(1);
+
+    s().undo();
+    expect(s().present.moveLog.length).toBe(0);
+
+    s().redo();
+    expect(s().present.moveLog.length).toBe(1);
   });
 });

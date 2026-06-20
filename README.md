@@ -88,8 +88,10 @@ npm run dev
 - 更改胜利条件
 - 添加 / 删除机关-门关联
 - 清除解法步骤
+- 开始录制（清空 moveLog 的动作）
+- 录制期间每一次成功移动
 
-录制移动时**不会**写入撤销栈，因为解法步骤仅保存在 `present.moveLog` 中，不会触发新的历史快照。
+撞墙、出界、被门阻挡等**非法移动**不会推入撤销栈，也不会修改 `moveLog`，因此不会污染历史。
 
 ---
 
@@ -138,12 +140,12 @@ npm run dev
 
 | 项目 | 存储键 | 说明 |
 |------|--------|------|
-| `past / present / future` | `puzzle-editor:v1:state` | 完整撤销栈 + 当前关卡 + 重做栈（JSON 字符串） |
+| `past / present / future` | `puzzle-editor:v1:state` | 完整撤销栈 + 当前关卡 + 重做栈；每条历史记录同时保存对应时刻的校验结果 |
 | `lastValidation` | 同上 | 上次校验结果（有效/无效/错误列表） |
 | `moveLog`、`moveLogInvalidated` | 同上（内嵌于 `present`） | 解法步骤及失效标记 |
 | 最后自动保存时间 | `puzzle-editor:v1:last-saved` | `Date.now()` 毫秒 |
 
-每次 `present` 引用变更后 500ms 内自动写入 localStorage。导出 JSON 可用于跨设备分享、版本管理、或作为单元测试 fixture。
+每次 `present` 引用变更 **或** `lastValidation` 校验结果变化后 500ms 内自动写入 localStorage。导出 JSON 可用于跨设备分享、版本管理、或作为单元测试 fixture。
 
 ---
 
